@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
-use pgn_reader::{Reader, Visitor};
-use rusqlite::{Connection, Result as SqlResult};
+use pgn_reader::{RawTag, Reader, Visitor};
+use rusqlite::{Connection, Result as SqlResult, params};
 
 #[derive(Debug)]
 pub enum ImportError {
@@ -16,17 +16,42 @@ pub struct ImportSummary {
     pub skipped: usize,
 }
 
-// implement From trait;
 impl From<std::io::Error> for ImportError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
 }
 
-// # starts an attribute in rust, derive is an attribute that asks rust to auto-generate trait implementations
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct GameHeaders {
+    event: Option<String>,
+    site: Option<String>,
+    date: Option<String>,
+    white: Option<String>,
+    black: Option<String>,
+    result: Option<String>,
+    eco: Option<String>,
+}
+
+impl GameHeaders {
+    fn set_tag(&mut self, name: &[u8], value: RawTag<'_>) {
+        let value = value.decode_utf8_lossy().into_owned();
+        match name {
+            b"Event" => self.event = Some(value),
+            b"Site" => self.site = Some(value),
+            b"Date" => self.date = Some(value),
+            b"White" => self.white = Some(value),
+            b"Black" => self.black = Some(value),
+            b"Result" => self.result = Some(value),
+            b"ECO" => self.eco = Some(value),
+            _ => {}
+        }
+    }
+}
+
 #[derive(Default)]
-struct GameCounter {
-    total: usize,
+struct GameCollector {
+    games: Vec<GameHeaders>,
 }
 
 impl From<rusqlite::Error> for ImportError {
@@ -64,39 +89,77 @@ pub fn init_db(path: &str) -> SqlResult<()> {
     Ok(())
 }
 
-impl Visitor for GameCounter {
-    type Tags = ();
-    type Movetext = ();
+impl Visitor for GameCollector {
+    type Tags = GameHeaders;
+    type Movetext = GameHeaders;
     type Output = ();
 
     fn begin_tags(&mut self) -> ControlFlow<Self::Output, Self::Tags> {
+        ControlFlow::Continue(GameHeaders::default())
+    }
+
+    fn tag(
+        &mut self,
+        tags: &mut Self::Tags,
+        name: &[u8],
+        value: RawTag<'_>,
+    ) -> ControlFlow<Self::Output> {
+        tags.set_tag(name, value);
         ControlFlow::Continue(())
     }
 
-    fn begin_movetext(&mut self, _tags: Self::Tags) -> ControlFlow<Self::Output, Self::Movetext> {
-        ControlFlow::Continue(())
+    fn begin_movetext(&mut self, tags: Self::Tags) -> ControlFlow<Self::Output, Self::Movetext> {
+        ControlFlow::Continue(tags)
     }
 
-    fn end_game(&mut self, _movetext: Self::Movetext) -> Self::Output {
-        self.total += 1
+    fn end_game(&mut self, movetext: Self::Movetext) -> Self::Output {
+        self.games.push(movetext);
     }
 }
 
-fn import_pgn_file(
+pub fn import_pgn_file(
     db_path: &str,
     pgn_path: &str,
 ) -> std::result::Result<ImportSummary, ImportError> {
-    let _conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
 
     let file = std::fs::File::open(pgn_path)?;
     let mut reader = Reader::new(file);
-    let mut counter = GameCounter::default();
+    let mut collector = GameCollector::default();
 
-    while reader.read_game(&mut counter)?.is_some() {}
+    while reader.read_game(&mut collector)?.is_some() {}
+
+    let total = collector.games.len();
+    let tx = conn.transaction()?;
+    let inserted = {
+        let mut stmt = tx.prepare(
+            "
+            INSERT INTO games (event, site, date, white, black, result, eco, pgn)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ",
+        )?;
+
+        let mut inserted = 0usize;
+        for game in &collector.games {
+            stmt.execute(params![
+                game.event.as_deref(),
+                game.site.as_deref(),
+                game.date.as_deref(),
+                game.white.as_deref(),
+                game.black.as_deref(),
+                game.result.as_deref(),
+                game.eco.as_deref(),
+                Option::<&str>::None
+            ])?;
+            inserted += 1;
+        }
+        inserted
+    };
+    tx.commit()?;
 
     Ok(ImportSummary {
-        total: counter.total,
-        inserted: 0,
-        skipped: 0,
+        total,
+        inserted,
+        skipped: total.saturating_sub(inserted),
     })
 }

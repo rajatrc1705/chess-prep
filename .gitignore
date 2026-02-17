@@ -1,1 +1,14 @@
 /target
+/.clang-module-cache
+/.swift-cache
+/.swiftpm-home
+/macos-app/ChessPrepApp/.build
+
+# Local OS / IDE metadata
+.DS_Store
+.swiftpm/
+
+# Documentation
+*.md
+docs/
+**/docs/
