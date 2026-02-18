@@ -42,6 +42,9 @@ struct LibraryView: View {
                     TableColumn("ECO", value: \.eco)
                     TableColumn("Event", value: \.event)
                 }
+                .onChange(of: state.selectedGameID) { _, _ in
+                    state.reloadReplayForCurrentSelection()
+                }
                 .background(Theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(

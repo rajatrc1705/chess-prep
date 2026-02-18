@@ -21,13 +21,25 @@ struct RootSplitView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $state.selectedSection) {
+        List {
             Section {
                 ForEach(AppSection.allCases) { section in
-                    Label(section.title, systemImage: section.systemImage)
-                        .foregroundStyle(Theme.textOnBrown)
-                        .tag(Optional(section))
-                        .listRowBackground(Theme.sidebarBackground)
+                    Button {
+                        state.selectedSection = section
+                    } label: {
+                        Label(section.title, systemImage: section.systemImage)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.textOnBrown)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(state.selectedSection == section ? Theme.accent.opacity(0.55) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                    .listRowBackground(Theme.sidebarBackground)
                 }
             } header: {
                 Text("Workspace")
@@ -131,7 +143,7 @@ struct RootSplitView: View {
         case .importPgn:
             ImportStatusView(state: state)
         case .library:
-            GameDetailView(game: state.selectedGame)
+            GameDetailView(state: state)
         }
     }
 }

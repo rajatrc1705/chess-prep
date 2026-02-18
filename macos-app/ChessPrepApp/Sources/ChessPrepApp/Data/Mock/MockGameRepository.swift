@@ -7,7 +7,8 @@ struct MockGameRepository: GameRepository {
         self.seedGames = seedGames
     }
 
-    func fetchGames(filter: GameFilter) async throws -> [GameSummary] {
+    func fetchGames(dbPath: String, filter: GameFilter) async throws -> [GameSummary] {
+        _ = dbPath
         try await Task.sleep(for: .milliseconds(110))
 
         return seedGames
@@ -18,6 +19,7 @@ struct MockGameRepository: GameRepository {
     static let previewGames: [GameSummary] = [
         GameSummary(
             id: UUID(uuidString: "80CFCE80-B862-4E3A-BA0A-38A344F07F73")!,
+            databaseID: 1,
             white: "Carlsen, Magnus",
             black: "Nepomniachtchi, Ian",
             result: "1-0",
@@ -28,6 +30,7 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "71D49E03-75A4-474E-BC30-A7D6A8A4FC30")!,
+            databaseID: 2,
             white: "Gukesh, D",
             black: "Caruana, Fabiano",
             result: "1/2-1/2",
@@ -38,6 +41,7 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "B7D2A9A5-3FE0-4135-8D72-B9E8A2D2737E")!,
+            databaseID: 3,
             white: "Kramnik, Vladimir",
             black: "Anand, Viswanathan",
             result: "0-1",
@@ -48,6 +52,7 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "32929A2A-1904-40E9-9A6E-6206424D10CB")!,
+            databaseID: 4,
             white: "Alice",
             black: "Bob",
             result: "1-0",
@@ -58,6 +63,7 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "8CF5BEF7-C74A-406E-B0B4-08DEBDA53B3E")!,
+            databaseID: 5,
             white: "Carol",
             black: "Dave",
             result: "0-1",

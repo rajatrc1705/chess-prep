@@ -1,11 +1,8 @@
+import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ImportView: View {
     @ObservedObject var state: AppState
-
-    @State private var showPgnPicker = false
-    @State private var showDbPicker = false
 
     var body: some View {
         ScrollView {
@@ -14,7 +11,7 @@ struct ImportView: View {
                     .font(Typography.title)
                     .foregroundStyle(Theme.textPrimary)
 
-                Text("Scaffolded flow for PGN ingestion. This view currently runs a mock import adapter and is ready for backend binding.")
+                Text("Native PGN import flow backed by the Rust engine.")
                     .font(Typography.body)
                     .foregroundStyle(Theme.textSecondary)
 
@@ -29,7 +26,7 @@ struct ImportView: View {
                     .textFieldStyle(.roundedBorder)
 
                     Button("Select Database File") {
-                        showDbPicker = true
+                        selectDatabasePath()
                     }
                     .buttonStyle(.bordered)
                 }
@@ -40,15 +37,27 @@ struct ImportView: View {
                         .font(Typography.sectionTitle)
 
                     TextField(
-                        "Path to PGN file",
-                        text: $state.pgnPath
+                        "Path to PGN file(s)",
+                        text: Binding(
+                            get: { state.pgnPath },
+                            set: { value in
+                                state.pgnPath = value
+                                state.selectedPgnPaths = []
+                            }
+                        )
                     )
                     .textFieldStyle(.roundedBorder)
 
-                    Button("Select PGN File") {
-                        showPgnPicker = true
+                    Button("Select PGN File(s)") {
+                        selectPgnPaths()
                     }
                     .buttonStyle(.bordered)
+
+                    if state.selectedPgnPaths.count > 1 {
+                        Text("\(state.selectedPgnPaths.count) PGN files selected for batch import.")
+                            .font(Typography.body)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
                 }
                 .panelCard()
 
@@ -59,7 +68,6 @@ struct ImportView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(state.isImportRunning)
 
                     if state.isImportRunning {
                         ProgressView()
@@ -73,29 +81,41 @@ struct ImportView: View {
         .tint(Theme.accent)
         .environment(\.colorScheme, .light)
         .background(Theme.background)
-        .fileImporter(
-            isPresented: $showPgnPicker,
-            allowedContentTypes: [.plainText, .data],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                state.pgnPath = urls.first?.path(percentEncoded: false) ?? ""
-            case .failure:
-                break
+    }
+
+    private func selectPgnPaths() {
+        let panel = NSOpenPanel()
+        panel.title = "Select PGN File(s)"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedFileTypes = ["pgn"]
+
+        if panel.runModal() == .OK {
+            let paths = panel.urls.map { $0.path(percentEncoded: false) }
+            guard !paths.isEmpty else {
+                return
+            }
+
+            state.selectedPgnPaths = paths
+            if paths.count == 1 {
+                state.pgnPath = paths[0]
+            } else {
+                state.pgnPath = paths.joined(separator: "; ")
             }
         }
-        .fileImporter(
-            isPresented: $showDbPicker,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                state.databasePath = urls.first?.path(percentEncoded: false) ?? ""
-            case .failure:
-                break
-            }
+    }
+
+    private func selectDatabasePath() {
+        let panel = NSOpenPanel()
+        panel.title = "Select SQLite Database"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = ["sqlite", "sqlite3", "db"]
+
+        if panel.runModal() == .OK, let url = panel.url {
+            state.databasePath = url.path(percentEncoded: false)
         }
     }
 }

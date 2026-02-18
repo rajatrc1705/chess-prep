@@ -15,7 +15,7 @@ enum RepositoryError: Error, LocalizedError, Equatable, Sendable {
 }
 
 protocol GameRepository: Sendable {
-    func fetchGames(filter: GameFilter) async throws -> [GameSummary]
+    func fetchGames(dbPath: String, filter: GameFilter) async throws -> [GameSummary]
 }
 
 protocol ImportRepository: Sendable {
@@ -24,4 +24,12 @@ protocol ImportRepository: Sendable {
         pgnPath: String,
         progress: @escaping @Sendable (ImportProgress) -> Void
     ) async throws -> ImportSummary
+}
+
+protocol ReplayRepository: Sendable {
+    func fetchReplay(dbPath: String, gameID: Int64) async throws -> ReplayData
+}
+
+protocol EngineRepository: Sendable {
+    func analyzePosition(enginePath: String, fen: String, depth: Int) async throws -> EngineAnalysis
 }

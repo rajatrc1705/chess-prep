@@ -7,6 +7,7 @@ final class GameFilterTests: XCTestCase {
     func testFilterMatchesCompositeCriteria() {
         let game = GameSummary(
             id: UUID(),
+            databaseID: 1,
             white: "Alice",
             black: "Bob",
             result: "1-0",
@@ -28,6 +29,7 @@ final class GameFilterTests: XCTestCase {
     func testFilterRejectsOnMismatchedResult() {
         let game = GameSummary(
             id: UUID(),
+            databaseID: 2,
             white: "Carol",
             black: "Dave",
             result: "0-1",

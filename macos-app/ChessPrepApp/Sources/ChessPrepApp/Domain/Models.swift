@@ -36,6 +36,7 @@ enum GameResultFilter: String, CaseIterable, Identifiable, Sendable {
 
 struct GameSummary: Identifiable, Equatable, Sendable {
     let id: UUID
+    let databaseID: Int64
     let white: String
     let black: String
     let result: String
@@ -106,4 +107,29 @@ enum ImportRunState: Equatable, Sendable {
     case running
     case success(ImportSummary)
     case failure(String)
+}
+
+struct ReplayData: Equatable, Sendable {
+    let fens: [String]
+    let sans: [String]
+    let ucis: [String]
+}
+
+struct EngineAnalysis: Equatable, Sendable {
+    let depth: Int
+    let scoreCp: Int?
+    let scoreMate: Int?
+    let bestMove: String?
+    let pv: [String]
+
+    var scoreLabel: String {
+        if let mate = scoreMate {
+            return "M\(mate)"
+        }
+        if let cp = scoreCp {
+            let pawns = Double(cp) / 100.0
+            return String(format: "%+.2f", pawns)
+        }
+        return "N/A"
+    }
 }

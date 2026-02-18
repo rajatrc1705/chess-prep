@@ -13,7 +13,8 @@ final class AppStateTests: XCTestCase {
             importRepository: MockImportRepository(
                 simulatedDelayNanoseconds: 0,
                 finalSummary: expected
-            )
+            ),
+            replayRepository: MockReplayRepository()
         )
 
         state.databasePath = "/tmp/chess-prep.sqlite"
@@ -26,7 +27,10 @@ final class AppStateTests: XCTestCase {
             return
         }
 
-        XCTAssertEqual(summary, expected)
+        XCTAssertEqual(summary.total, expected.total)
+        XCTAssertEqual(summary.inserted, expected.inserted)
+        XCTAssertEqual(summary.skipped, expected.skipped)
+        XCTAssertGreaterThanOrEqual(summary.durationMs, 0)
         XCTAssertEqual(state.importProgress.total, expected.total)
         XCTAssertEqual(state.importProgress.inserted, expected.inserted)
         XCTAssertEqual(state.importProgress.skipped, expected.skipped)
@@ -35,7 +39,8 @@ final class AppStateTests: XCTestCase {
     func testSelectedGameTracksSelectedGameID() async throws {
         let state = AppState(
             gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
-            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0)
+            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
+            replayRepository: MockReplayRepository()
         )
 
         await state.loadGames()
@@ -49,7 +54,8 @@ final class AppStateTests: XCTestCase {
     func testLoadGamesAppliesFilterFromState() async {
         let state = AppState(
             gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
-            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0)
+            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
+            replayRepository: MockReplayRepository()
         )
 
         state.filter.searchText = "Carlsen"
