@@ -7,6 +7,7 @@ struct GameDetailView: View {
     @ObservedObject var state: AppState
     @State private var whiteAtBottom = true
     @FocusState private var replayFocused: Bool
+    private let boardCellSize: CGFloat = 46
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -82,7 +83,7 @@ struct GameDetailView: View {
     private var replayBoardPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Board Replay")
+                Text("Position Explorer")
                     .font(Typography.detailLabel)
 
                 Spacer()
@@ -111,9 +112,10 @@ struct GameDetailView: View {
                     boardView(
                         fen: currentFen,
                         whiteAtBottom: whiteAtBottom,
-                        highlightedSquares: highlightedSquares()
+                        highlightedSquares: highlightedSquares(),
+                        lastMove: lastMoveSquares()
                     )
-                    .frame(maxWidth: 340, alignment: .leading)
+                    .frame(maxWidth: 390, alignment: .leading)
 
                     moveListView
                         .frame(maxWidth: .infinity, minHeight: 300, alignment: .topLeading)
@@ -346,61 +348,56 @@ struct GameDetailView: View {
     private func boardView(
         fen: String,
         whiteAtBottom: Bool,
-        highlightedSquares: Set<String>
+        highlightedSquares: Set<String>,
+        lastMove: (from: String, to: String)?
     ) -> some View {
         let board = boardMatrix(from: fen)
-        let rankOrder = whiteAtBottom ? Array(0..<8) : Array((0..<8).reversed())
-        let fileOrder = whiteAtBottom ? Array(0..<8) : Array((0..<8).reversed())
-        let files = whiteAtBottom ? Array("abcdefgh") : Array("hgfedcba")
+        let boardSize = boardCellSize * 8
 
-        return VStack(alignment: .leading, spacing: 6) {
-            ForEach(rankOrder, id: \.self) { boardRank in
-                HStack(spacing: 0) {
-                    Text("\(8 - boardRank)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 12)
+        return ZStack {
+            VStack(spacing: 0) {
+                ForEach(0..<8, id: \.self) { displayRow in
+                    HStack(spacing: 0) {
+                        ForEach(0..<8, id: \.self) { displayCol in
+                            let boardRank = whiteAtBottom ? displayRow : 7 - displayRow
+                            let boardFile = whiteAtBottom ? displayCol : 7 - displayCol
+                            let piece = board[boardRank][boardFile]
+                            let isDark = (boardRank + boardFile).isMultiple(of: 2)
+                            let square = squareName(rankIndex: boardRank, fileIndex: boardFile)
+                            let isHighlighted = highlightedSquares.contains(square)
 
-                    ForEach(fileOrder, id: \.self) { boardFile in
-                        let piece = board[boardRank][boardFile]
-                        let isDark = (boardRank + boardFile).isMultiple(of: 2)
-                        let square = squareName(rankIndex: boardRank, fileIndex: boardFile)
-                        let isHighlighted = highlightedSquares.contains(square)
+                            ZStack {
+                                Rectangle()
+                                    .fill(isDark ? explorerDark : explorerLight)
+                                    .frame(width: boardCellSize, height: boardCellSize)
 
-                        ZStack {
-                            Rectangle()
-                                .fill(isDark ? Theme.accent : Theme.surfaceAlt)
-                                .frame(width: 34, height: 34)
+                                if isHighlighted {
+                                    Rectangle()
+                                        .fill(Color.yellow.opacity(0.34))
+                                        .frame(width: boardCellSize, height: boardCellSize)
+                                }
 
-                            if let piece {
-                                Text(symbol(for: piece))
-                                    .font(.system(size: 23))
-                                    .foregroundStyle(pieceColor(piece, isDark: isDark))
+                                if let piece {
+                                    pieceGlyph(for: piece)
+                                }
                             }
                         }
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 0)
-                                .stroke(
-                                    isHighlighted ? Theme.success.opacity(0.95) : Theme.border.opacity(0.2),
-                                    lineWidth: isHighlighted ? 2 : 0.5
-                                )
-                        )
                     }
                 }
             }
 
-            HStack(spacing: 0) {
-                Spacer()
-                    .frame(width: 12)
-
-                ForEach(files, id: \.self) { file in
-                    Text(String(file))
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 34)
-                }
+            if let lastMove,
+               let from = boardPoint(for: lastMove.from, whiteAtBottom: whiteAtBottom),
+               let to = boardPoint(for: lastMove.to, whiteAtBottom: whiteAtBottom) {
+                lastMoveArrow(from: from, to: to)
             }
         }
+        .frame(width: boardSize, height: boardSize)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(explorerBorder, lineWidth: 1)
+        )
     }
 
     private func highlightedSquares() -> Set<String> {
@@ -416,6 +413,68 @@ struct GameDetailView: View {
 
         guard isSquareString(from), isSquareString(to) else { return [] }
         return [from, to]
+    }
+
+    private func lastMoveSquares() -> (from: String, to: String)? {
+        guard state.currentPly > 0 else { return nil }
+        let index = state.currentPly - 1
+        guard state.replayUcis.indices.contains(index) else { return nil }
+        let uci = state.replayUcis[index]
+        guard uci.count >= 4 else { return nil }
+
+        let chars = Array(uci)
+        let from = String(chars[0...1])
+        let to = String(chars[2...3])
+        guard isSquareString(from), isSquareString(to) else { return nil }
+        return (from, to)
+    }
+
+    private func boardPoint(for square: String, whiteAtBottom: Bool) -> CGPoint? {
+        guard square.count == 2 else { return nil }
+        let bytes = Array(square.utf8)
+        guard bytes.count == 2 else { return nil }
+
+        let file = Int(bytes[0] - 97)
+        let rank = Int(bytes[1] - 49)
+        guard (0..<8).contains(file), (0..<8).contains(rank) else { return nil }
+
+        let boardRank = 7 - rank
+        let boardFile = file
+
+        let displayRow = whiteAtBottom ? boardRank : 7 - boardRank
+        let displayCol = whiteAtBottom ? boardFile : 7 - boardFile
+
+        return CGPoint(
+            x: CGFloat(displayCol) * boardCellSize + boardCellSize / 2,
+            y: CGFloat(displayRow) * boardCellSize + boardCellSize / 2
+        )
+    }
+
+    private func lastMoveArrow(from: CGPoint, to: CGPoint) -> some View {
+        Canvas { context, _ in
+            var path = Path()
+            path.move(to: from)
+            path.addLine(to: to)
+            context.stroke(path, with: .color(.yellow.opacity(0.88)), lineWidth: 4)
+
+            let angle = atan2(to.y - from.y, to.x - from.x)
+            let headLength: CGFloat = 11
+            let left = CGPoint(
+                x: to.x - headLength * cos(angle - .pi / 6),
+                y: to.y - headLength * sin(angle - .pi / 6)
+            )
+            let right = CGPoint(
+                x: to.x - headLength * cos(angle + .pi / 6),
+                y: to.y - headLength * sin(angle + .pi / 6)
+            )
+
+            var head = Path()
+            head.move(to: to)
+            head.addLine(to: left)
+            head.addLine(to: right)
+            head.closeSubpath()
+            context.fill(head, with: .color(.yellow.opacity(0.88)))
+        }
     }
 
     private func isSquareString(_ value: String) -> Bool {
@@ -457,12 +516,13 @@ struct GameDetailView: View {
 
     private func symbol(for piece: Character) -> String {
         switch piece {
-        case "K": return "♔"
-        case "Q": return "♕"
-        case "R": return "♖"
-        case "B": return "♗"
-        case "N": return "♘"
-        case "P": return "♙"
+        // Use the filled glyph set for both sides; color differentiates white/black.
+        case "K": return "♚"
+        case "Q": return "♛"
+        case "R": return "♜"
+        case "B": return "♝"
+        case "N": return "♞"
+        case "P": return "♟"
         case "k": return "♚"
         case "q": return "♛"
         case "r": return "♜"
@@ -473,11 +533,48 @@ struct GameDetailView: View {
         }
     }
 
-    private func pieceColor(_ piece: Character, isDark: Bool) -> Color {
+    private var explorerDark: Color {
+        Color(red: 0.36, green: 0.24, blue: 0.16)
+    }
+
+    private var explorerLight: Color {
+        Color(red: 0.84, green: 0.73, blue: 0.57)
+    }
+
+    private var explorerBorder: Color {
+        Color(red: 0.23, green: 0.15, blue: 0.10).opacity(0.85)
+    }
+
+    @ViewBuilder
+    private func pieceGlyph(for piece: Character) -> some View {
+        let glyph = symbol(for: piece)
+        let pieceFont = Font.system(size: 31)
+
         if piece.isUppercase {
-            return isDark ? Theme.textOnBrown : Theme.accent
+            let offsets: [CGSize] = [
+                CGSize(width: -0.7, height: 0),
+                CGSize(width: 0.7, height: 0),
+                CGSize(width: 0, height: -0.7),
+                CGSize(width: 0, height: 0.7),
+            ]
+
+            ZStack {
+                ForEach(Array(offsets.enumerated()), id: \.offset) { _, offset in
+                    Text(glyph)
+                        .font(pieceFont)
+                        .foregroundStyle(Color.black.opacity(0.95))
+                        .offset(x: offset.width, y: offset.height)
+                }
+
+                Text(glyph)
+                    .font(pieceFont)
+                    .foregroundStyle(Color(red: 0.95, green: 0.94, blue: 0.90))
+            }
+        } else {
+            Text(glyph)
+                .font(pieceFont)
+                .foregroundStyle(Color.black)
         }
-        return isDark ? Theme.textOnBrown.opacity(0.92) : Theme.textPrimary
     }
 
     private func activeColor(from fen: String) -> String {
