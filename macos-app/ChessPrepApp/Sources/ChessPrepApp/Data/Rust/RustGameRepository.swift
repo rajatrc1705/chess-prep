@@ -43,6 +43,14 @@ struct RustGameRepository: GameRepository {
             args += ["--event-or-site", eventOrSite]
         }
 
+        if let dateFrom = RustBridge.normalized(filter.dateFrom) {
+            args += ["--date-from", dateFrom]
+        }
+
+        if let dateTo = RustBridge.normalized(filter.dateTo) {
+            args += ["--date-to", dateTo]
+        }
+
         args += ["--limit", "500", "--offset", "0"]
 
         do {

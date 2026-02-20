@@ -55,6 +55,8 @@ struct GameFilter: Equatable, Sendable {
     var result: GameResultFilter = .any
     var eco = ""
     var eventOrSite = ""
+    var dateFrom = ""
+    var dateTo = ""
 
     func matches(_ game: GameSummary) -> Bool {
         let normalizedSearch = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -82,6 +84,16 @@ struct GameFilter: Equatable, Sendable {
             if !eventSite.contains(normalizedEventOrSite) {
                 return false
             }
+        }
+
+        let normalizedDateFrom = dateFrom.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedDateFrom.isEmpty && game.date < normalizedDateFrom {
+            return false
+        }
+
+        let normalizedDateTo = dateTo.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedDateTo.isEmpty && game.date > normalizedDateTo {
+            return false
         }
 
         return true

@@ -44,5 +44,63 @@ final class GameFilterTests: XCTestCase {
 
         XCTAssertFalse(filter.matches(game))
     }
+
+    func testFilterMatchesWithinDateRange() {
+        let game = GameSummary(
+            id: UUID(),
+            databaseID: 3,
+            white: "Eve",
+            black: "Frank",
+            result: "1-0",
+            date: "2024.06.15",
+            eco: "C42",
+            event: "Open",
+            site: "Madrid"
+        )
+
+        var filter = GameFilter()
+        filter.dateFrom = "2024.01.01"
+        filter.dateTo = "2024.12.31"
+
+        XCTAssertTrue(filter.matches(game))
+    }
+
+    func testFilterRejectsBeforeDateFrom() {
+        let game = GameSummary(
+            id: UUID(),
+            databaseID: 4,
+            white: "Gina",
+            black: "Hank",
+            result: "0-1",
+            date: "2023.12.31",
+            eco: "B90",
+            event: "Qualifier",
+            site: "Rome"
+        )
+
+        var filter = GameFilter()
+        filter.dateFrom = "2024.01.01"
+
+        XCTAssertFalse(filter.matches(game))
+    }
+
+    func testFilterRejectsAfterDateTo() {
+        let game = GameSummary(
+            id: UUID(),
+            databaseID: 5,
+            white: "Ivy",
+            black: "Jack",
+            result: "1/2-1/2",
+            date: "2025.01.01",
+            eco: "D30",
+            event: "Masters",
+            site: "Prague"
+        )
+
+        var filter = GameFilter()
+        filter.dateTo = "2024.12.31"
+
+        XCTAssertFalse(filter.matches(game))
+    }
 }
 #endif

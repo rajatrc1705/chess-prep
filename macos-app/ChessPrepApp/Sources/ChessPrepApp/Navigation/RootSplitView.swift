@@ -115,7 +115,23 @@ struct RootSplitView: View {
                     )
                     .listRowBackground(Theme.sidebarBackground)
 
+                    sidebarTextField(
+                        "Date from (YYYY.MM.DD)",
+                        text: Binding(
+                            get: { state.filter.dateFrom },
+                            set: { state.filter.dateFrom = $0 }
+                        )
+                    )
+                    .listRowBackground(Theme.sidebarBackground)
 
+                    sidebarTextField(
+                        "Date to (YYYY.MM.DD)",
+                        text: Binding(
+                            get: { state.filter.dateTo },
+                            set: { state.filter.dateTo = $0 }
+                        )
+                    )
+                    .listRowBackground(Theme.sidebarBackground)
 
                     HStack(spacing: 12) {
                         sidebarFilterButton(
