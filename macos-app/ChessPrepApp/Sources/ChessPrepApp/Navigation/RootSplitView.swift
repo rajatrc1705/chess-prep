@@ -2,17 +2,23 @@ import SwiftUI
 
 struct RootSplitView: View {
     @ObservedObject var state: AppState
+    private let sidebarWidth: CGFloat = 290
+    private let detailWidth: CGFloat = 380
 
     var body: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             sidebar
-                .navigationSplitViewColumnWidth(min: 250, ideal: 290)
-        } content: {
+                .frame(width: sidebarWidth)
+                .frame(maxHeight: .infinity, alignment: .top)
+
             content
-                .navigationSplitViewColumnWidth(min: 560, ideal: 700)
-        } detail: {
-            detail
-                .navigationSplitViewColumnWidth(min: 320, ideal: 380)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            if shouldShowDetailColumn {
+                detail
+                    .frame(width: detailWidth)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
         }
         .background(Theme.background.ignoresSafeArea())
         .task {
@@ -20,25 +26,45 @@ struct RootSplitView: View {
         }
     }
 
+    private var isGameExplorerRouteActive: Bool {
+        guard state.selectedSection == .library else { return false }
+        guard let route = state.libraryPath.last else { return false }
+        if case .gameExplorer = route {
+            return true
+        }
+        return false
+    }
+
+    private var shouldShowDetailColumn: Bool {
+        switch state.selectedSection ?? .library {
+        case .importPgn:
+            return true
+        case .library:
+            return !isGameExplorerRouteActive
+        }
+    }
+
     private var sidebar: some View {
         List {
             Section {
                 ForEach(AppSection.allCases) { section in
-                    Button {
-                        state.selectedSection = section
-                    } label: {
+                    HStack {
                         Label(section.title, systemImage: section.systemImage)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 6)
-                            .padding(.horizontal, 8)
+                        Spacer(minLength: 0)
                     }
-                    .buttonStyle(.plain)
                     .foregroundStyle(Theme.textOnBrown)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(state.selectedSection == section ? Theme.accent.opacity(0.55) : .clear)
+                            .fill(state.selectedSection == section ? Theme.accent.opacity(0.55) : Theme.accent.opacity(0.18))
                     )
-                    .contentShape(Rectangle())
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                    .onTapGesture {
+                        state.selectedSection = section
+                    }
+                    .accessibilityAddTraits(.isButton)
                     .listRowBackground(Theme.sidebarBackground)
                 }
             } header: {
@@ -89,19 +115,25 @@ struct RootSplitView: View {
                     )
                     .listRowBackground(Theme.sidebarBackground)
 
-                    HStack {
-                        Button("Apply") {
+
+
+                    HStack(spacing: 12) {
+                        sidebarFilterButton(
+                            title: "Apply",
+                            foreground: Theme.sidebarBackground,
+                            background: Theme.textOnBrown
+                        ) {
                             state.reloadWithCurrentFilter()
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.textOnBrown)
-                        .foregroundStyle(Theme.sidebarBackground)
 
-                        Button("Reset") {
+                        sidebarFilterButton(
+                            title: "Reset",
+                            foreground: Theme.textOnBrown,
+                            background: Theme.accent.opacity(0.55),
+                            border: Theme.textOnBrown.opacity(0.25)
+                        ) {
                             state.resetFilters()
                         }
-                        .buttonStyle(.bordered)
-                        .foregroundStyle(Theme.textOnBrown)
                     }
                     .listRowBackground(Theme.sidebarBackground)
                 } header: {
@@ -118,13 +150,50 @@ struct RootSplitView: View {
     }
 
     private func sidebarTextField(_ title: String, text: Binding<String>) -> some View {
-        TextField(title, text: text)
-            .textFieldStyle(.plain)
-            .foregroundStyle(Theme.textPrimary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Theme.sidebarFieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+        ZStack(alignment: .leading) {
+            if text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(title)
+                    .foregroundStyle(Theme.textSecondary.opacity(0.78))
+                    .allowsHitTesting(false)
+            }
+
+            TextField("", text: text)
+                .textFieldStyle(.plain)
+                .foregroundStyle(Theme.textPrimary)
+                .tint(Theme.textPrimary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Theme.sidebarFieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .environment(\.colorScheme, .light)
+    }
+
+    private func sidebarFilterButton(
+        title: String,
+        foreground: Color,
+        background: Color,
+        border: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .foregroundStyle(foreground)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(background)
+                )
+                .overlay {
+                    if let border {
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(border, lineWidth: 1)
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -133,7 +202,15 @@ struct RootSplitView: View {
         case .importPgn:
             ImportView(state: state)
         case .library:
-            LibraryView(state: state)
+            NavigationStack(path: $state.libraryPath) {
+                LibraryView(state: state)
+                    .navigationDestination(for: LibraryRoute.self) { route in
+                        switch route {
+                        case .gameExplorer(let gameID):
+                            GameDetailView(state: state, databaseGameID: gameID)
+                        }
+                    }
+            }
         }
     }
 
@@ -143,7 +220,12 @@ struct RootSplitView: View {
         case .importPgn:
             ImportStatusView(state: state)
         case .library:
-            GameDetailView(state: state)
+            if isGameExplorerRouteActive {
+                Color.clear
+                    .allowsHitTesting(false)
+            } else {
+                GamePreviewView(state: state)
+            }
         }
     }
 }

@@ -25,6 +25,10 @@ enum AppSection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum LibraryRoute: Hashable, Sendable {
+    case gameExplorer(Int64)
+}
+
 enum GameResultFilter: String, CaseIterable, Identifiable, Sendable {
     case any = "Any"
     case whiteWin = "1-0"
@@ -88,10 +92,11 @@ struct ImportProgress: Equatable, Sendable {
     let total: Int
     let inserted: Int
     let skipped: Int
+    let errors: Int
 
     var completion: Double {
         guard total > 0 else { return 0 }
-        return Double(inserted + skipped) / Double(total)
+        return Double(inserted + skipped + errors) / Double(total)
     }
 }
 
@@ -99,6 +104,7 @@ struct ImportSummary: Equatable, Sendable {
     let total: Int
     let inserted: Int
     let skipped: Int
+    let errors: Int
     let durationMs: Int
 }
 

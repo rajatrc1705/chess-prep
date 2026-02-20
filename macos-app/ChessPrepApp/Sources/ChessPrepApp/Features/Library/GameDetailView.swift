@@ -5,79 +5,98 @@ import AppKit
 
 struct GameDetailView: View {
     @ObservedObject var state: AppState
+    let databaseGameID: Int64?
     @State private var whiteAtBottom = true
     @FocusState private var replayFocused: Bool
-    private let boardCellSize: CGFloat = 46
+
+    private let boardCellSize: CGFloat = 60
+    private let explorerColumnMaxWidth: CGFloat = 1180
+
+    init(state: AppState, databaseGameID: Int64? = nil) {
+        self.state = state
+        self.databaseGameID = databaseGameID
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Game Detail")
-                .font(Typography.sectionTitle)
-                .foregroundStyle(Theme.textPrimary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Game Explorer")
+                    .font(Typography.sectionTitle)
+                    .foregroundStyle(Theme.textPrimary)
 
-            if let game = state.selectedGame {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("\(game.white) vs \(game.black)")
-                        .font(Typography.sectionTitle)
+                if let game = state.selectedGame {
+                    metadataBar(for: game)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .panelCard()
 
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                        GridRow {
-                            Text("Result")
-                                .font(Typography.detailLabel)
-                            Text(game.result)
-                                .font(Typography.dataMono)
-                        }
-                        GridRow {
-                            Text("Date")
-                                .font(Typography.detailLabel)
-                            Text(game.date)
-                                .font(Typography.dataMono)
-                        }
-                        GridRow {
-                            Text("ECO")
-                                .font(Typography.detailLabel)
-                            Text(game.eco)
-                                .font(Typography.dataMono)
-                        }
-                        GridRow {
-                            Text("Event")
-                                .font(Typography.detailLabel)
-                            Text(game.event)
-                                .font(Typography.body)
-                        }
-                        GridRow {
-                            Text("Site")
-                                .font(Typography.detailLabel)
-                            Text(game.site)
-                                .font(Typography.body)
-                        }
-                    }
+                    replayBoardPanel
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .panelCard()
+                } else {
+                    Text("Select a game row from the library to inspect metadata and replay the moves.")
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
-                .panelCard()
-
-                replayBoardPanel
-                    .panelCard()
-            } else {
-                Text("Select a game from the table to inspect metadata and replay the moves.")
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-
-            Spacer()
+            .frame(maxWidth: explorerColumnMaxWidth, alignment: .leading)
+            .padding(20)
         }
         .foregroundStyle(Theme.textPrimary)
         .environment(\.colorScheme, .light)
-        .padding(20)
         .background(Theme.background)
         .focusable()
         .focused($replayFocused)
         .onAppear {
             replayFocused = true
+            if let databaseGameID {
+                state.selectGame(databaseID: databaseGameID)
+                state.reloadReplayForCurrentSelection()
+            }
+        }
+        .onChange(of: databaseGameID) { _, nextID in
+            guard let nextID else { return }
+            state.selectGame(databaseID: nextID)
+            state.reloadReplayForCurrentSelection()
         }
         .onChange(of: state.selectedGameID) { _, _ in
             replayFocused = true
         }
         .onMoveCommand(perform: handleMoveCommand)
+    }
+
+    private var boardPixelSize: CGFloat {
+        boardCellSize * 8
+    }
+
+    private func metadataBar(for game: GameSummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("\(game.white) vs \(game.black)")
+                .font(Typography.sectionTitle)
+
+            HStack(spacing: 10) {
+                metadataChip(title: "Result", value: game.result, width: 92)
+                metadataChip(title: "Date", value: game.date, width: 112)
+                metadataChip(title: "ECO", value: game.eco, width: 78)
+                metadataChip(title: "Event", value: game.event)
+                metadataChip(title: "Site", value: game.site)
+            }
+        }
+    }
+
+    private func metadataChip(title: String, value: String, width: CGFloat? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(Typography.detailLabel)
+                .foregroundStyle(Theme.textSecondary)
+            Text(value)
+                .font(Typography.dataMono)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(minWidth: width, maxWidth: width ?? .infinity, alignment: .leading)
+        .background(Theme.surfaceAlt.opacity(0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private var replayBoardPanel: some View {
@@ -108,17 +127,18 @@ struct GameDetailView: View {
                     .font(Typography.body)
                     .foregroundStyle(Theme.error)
             } else if let currentFen = state.currentFen {
-                HStack(alignment: .top, spacing: 14) {
-                    boardView(
+                HStack(alignment: .top, spacing: 18) {
+                    ChessBoardView(
                         fen: currentFen,
                         whiteAtBottom: whiteAtBottom,
                         highlightedSquares: highlightedSquares(),
-                        lastMove: lastMoveSquares()
+                        lastMove: lastMoveSquares(),
+                        cellSize: boardCellSize
                     )
-                    .frame(maxWidth: 390, alignment: .leading)
+                    .frame(width: boardPixelSize, height: boardPixelSize, alignment: .topLeading)
 
                     moveListView
-                        .frame(maxWidth: .infinity, minHeight: 300, alignment: .topLeading)
+                        .frame(minWidth: 380, maxWidth: .infinity, minHeight: boardPixelSize, maxHeight: boardPixelSize, alignment: .topLeading)
                 }
 
                 if state.maxPly > 0 {
@@ -164,13 +184,8 @@ struct GameDetailView: View {
                 HStack(spacing: 8) {
                     statusChip(title: "Turn", value: activeColor(from: currentFen))
                     statusChip(title: "Move", value: fullMoveNumber(from: currentFen))
-                    statusChip(title: "SAN", value: state.currentMoveSAN ?? "-")
+                    statusChip(title: "", value: state.currentMoveSAN ?? "-")
                 }
-
-                Text(currentFen)
-                    .font(Typography.dataMono)
-                    .foregroundStyle(Theme.textSecondary)
-                    .textSelection(.enabled)
 
                 enginePanel(currentFen: currentFen)
             } else {
@@ -249,16 +264,16 @@ struct GameDetailView: View {
 
     private var moveListView: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 6) {
+            LazyVStack(alignment: .leading, spacing: 7) {
                 ForEach(0..<((state.replaySans.count + 1) / 2), id: \.self) { turn in
                     let whiteIndex = turn * 2
                     let blackIndex = whiteIndex + 1
 
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         Text("\(turn + 1).")
                             .font(Typography.dataMono)
                             .foregroundStyle(Theme.textSecondary)
-                            .frame(width: 34, alignment: .trailing)
+                            .frame(width: 36, alignment: .trailing)
 
                         moveCell(index: whiteIndex)
                         moveCell(index: blackIndex)
@@ -266,7 +281,7 @@ struct GameDetailView: View {
                 }
             }
         }
-        .padding(10)
+        .padding(12)
         .background(Theme.surfaceAlt.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
@@ -284,9 +299,9 @@ struct GameDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .font(Typography.dataMono)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .frame(minWidth: 62, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .frame(minWidth: 80, alignment: .leading)
                 .background(ply == state.currentPly ? Theme.accent.opacity(0.25) : Theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
@@ -295,7 +310,7 @@ struct GameDetailView: View {
                 )
             } else {
                 Color.clear
-                    .frame(minWidth: 62, maxHeight: 1)
+                    .frame(minWidth: 80, maxHeight: 1)
             }
         }
     }
@@ -318,9 +333,11 @@ struct GameDetailView: View {
 
     private func statusChip(title: String, value: String) -> some View {
         HStack(spacing: 4) {
-            Text(title)
-                .font(Typography.detailLabel)
-                .foregroundStyle(Theme.textSecondary)
+            if !title.isEmpty {
+                Text(title)
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+            }
             Text(value)
                 .font(Typography.dataMono)
                 .foregroundStyle(Theme.textPrimary)
@@ -343,61 +360,6 @@ struct GameDetailView: View {
             state.enginePath = url.path
         }
         #endif
-    }
-
-    private func boardView(
-        fen: String,
-        whiteAtBottom: Bool,
-        highlightedSquares: Set<String>,
-        lastMove: (from: String, to: String)?
-    ) -> some View {
-        let board = boardMatrix(from: fen)
-        let boardSize = boardCellSize * 8
-
-        return ZStack {
-            VStack(spacing: 0) {
-                ForEach(0..<8, id: \.self) { displayRow in
-                    HStack(spacing: 0) {
-                        ForEach(0..<8, id: \.self) { displayCol in
-                            let boardRank = whiteAtBottom ? displayRow : 7 - displayRow
-                            let boardFile = whiteAtBottom ? displayCol : 7 - displayCol
-                            let piece = board[boardRank][boardFile]
-                            let isDark = (boardRank + boardFile).isMultiple(of: 2)
-                            let square = squareName(rankIndex: boardRank, fileIndex: boardFile)
-                            let isHighlighted = highlightedSquares.contains(square)
-
-                            ZStack {
-                                Rectangle()
-                                    .fill(isDark ? explorerDark : explorerLight)
-                                    .frame(width: boardCellSize, height: boardCellSize)
-
-                                if isHighlighted {
-                                    Rectangle()
-                                        .fill(Color.yellow.opacity(0.34))
-                                        .frame(width: boardCellSize, height: boardCellSize)
-                                }
-
-                                if let piece {
-                                    pieceGlyph(for: piece)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let lastMove,
-               let from = boardPoint(for: lastMove.from, whiteAtBottom: whiteAtBottom),
-               let to = boardPoint(for: lastMove.to, whiteAtBottom: whiteAtBottom) {
-                lastMoveArrow(from: from, to: to)
-            }
-        }
-        .frame(width: boardSize, height: boardSize)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(explorerBorder, lineWidth: 1)
-        )
     }
 
     private func highlightedSquares() -> Set<String> {
@@ -429,152 +391,11 @@ struct GameDetailView: View {
         return (from, to)
     }
 
-    private func boardPoint(for square: String, whiteAtBottom: Bool) -> CGPoint? {
-        guard square.count == 2 else { return nil }
-        let bytes = Array(square.utf8)
-        guard bytes.count == 2 else { return nil }
-
-        let file = Int(bytes[0] - 97)
-        let rank = Int(bytes[1] - 49)
-        guard (0..<8).contains(file), (0..<8).contains(rank) else { return nil }
-
-        let boardRank = 7 - rank
-        let boardFile = file
-
-        let displayRow = whiteAtBottom ? boardRank : 7 - boardRank
-        let displayCol = whiteAtBottom ? boardFile : 7 - boardFile
-
-        return CGPoint(
-            x: CGFloat(displayCol) * boardCellSize + boardCellSize / 2,
-            y: CGFloat(displayRow) * boardCellSize + boardCellSize / 2
-        )
-    }
-
-    private func lastMoveArrow(from: CGPoint, to: CGPoint) -> some View {
-        Canvas { context, _ in
-            var path = Path()
-            path.move(to: from)
-            path.addLine(to: to)
-            context.stroke(path, with: .color(.yellow.opacity(0.88)), lineWidth: 4)
-
-            let angle = atan2(to.y - from.y, to.x - from.x)
-            let headLength: CGFloat = 11
-            let left = CGPoint(
-                x: to.x - headLength * cos(angle - .pi / 6),
-                y: to.y - headLength * sin(angle - .pi / 6)
-            )
-            let right = CGPoint(
-                x: to.x - headLength * cos(angle + .pi / 6),
-                y: to.y - headLength * sin(angle + .pi / 6)
-            )
-
-            var head = Path()
-            head.move(to: to)
-            head.addLine(to: left)
-            head.addLine(to: right)
-            head.closeSubpath()
-            context.fill(head, with: .color(.yellow.opacity(0.88)))
-        }
-    }
-
     private func isSquareString(_ value: String) -> Bool {
         guard value.count == 2 else { return false }
         let bytes = Array(value.utf8)
         guard bytes.count == 2 else { return false }
         return (bytes[0] >= 97 && bytes[0] <= 104) && (bytes[1] >= 49 && bytes[1] <= 56)
-    }
-
-    private func squareName(rankIndex: Int, fileIndex: Int) -> String {
-        let fileUnicode = UnicodeScalar(97 + fileIndex) ?? UnicodeScalar(97)!
-        let rank = 8 - rankIndex
-        return "\(Character(fileUnicode))\(rank)"
-    }
-
-    private func boardMatrix(from fen: String) -> [[Character?]] {
-        let boardPart = fen.split(separator: " ").first.map(String.init) ?? ""
-        let ranks = boardPart.split(separator: "/", omittingEmptySubsequences: false)
-        guard ranks.count == 8 else {
-            return Array(repeating: Array(repeating: nil, count: 8), count: 8)
-        }
-
-        return ranks.map { rank in
-            var row: [Character?] = []
-            for char in rank {
-                if let emptyCount = char.wholeNumberValue {
-                    row.append(contentsOf: Array(repeating: nil, count: emptyCount))
-                } else {
-                    row.append(char)
-                }
-            }
-
-            if row.count < 8 {
-                row.append(contentsOf: Array(repeating: nil, count: 8 - row.count))
-            }
-            return Array(row.prefix(8))
-        }
-    }
-
-    private func symbol(for piece: Character) -> String {
-        switch piece {
-        // Use the filled glyph set for both sides; color differentiates white/black.
-        case "K": return "♚"
-        case "Q": return "♛"
-        case "R": return "♜"
-        case "B": return "♝"
-        case "N": return "♞"
-        case "P": return "♟"
-        case "k": return "♚"
-        case "q": return "♛"
-        case "r": return "♜"
-        case "b": return "♝"
-        case "n": return "♞"
-        case "p": return "♟"
-        default: return ""
-        }
-    }
-
-    private var explorerDark: Color {
-        Color(red: 0.36, green: 0.24, blue: 0.16)
-    }
-
-    private var explorerLight: Color {
-        Color(red: 0.84, green: 0.73, blue: 0.57)
-    }
-
-    private var explorerBorder: Color {
-        Color(red: 0.23, green: 0.15, blue: 0.10).opacity(0.85)
-    }
-
-    @ViewBuilder
-    private func pieceGlyph(for piece: Character) -> some View {
-        let glyph = symbol(for: piece)
-        let pieceFont = Font.system(size: 31)
-
-        if piece.isUppercase {
-            let offsets: [CGSize] = [
-                CGSize(width: -0.7, height: 0),
-                CGSize(width: 0.7, height: 0),
-                CGSize(width: 0, height: -0.7),
-                CGSize(width: 0, height: 0.7),
-            ]
-
-            ZStack {
-                ForEach(Array(offsets.enumerated()), id: \.offset) { _, offset in
-                    Text(glyph)
-                        .font(pieceFont)
-                        .foregroundStyle(Color.black.opacity(0.95))
-                        .offset(x: offset.width, y: offset.height)
-                }
-
-                Text(glyph)
-                    .font(pieceFont)
-                    .foregroundStyle(Color(red: 0.95, green: 0.94, blue: 0.90))
-            }
-        } else {
-            Text(glyph)
-                .font(pieceFont)
-                .foregroundStyle(Color.black)
-        }
     }
 
     private func activeColor(from fen: String) -> String {

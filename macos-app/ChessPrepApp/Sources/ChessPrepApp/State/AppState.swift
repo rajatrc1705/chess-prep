@@ -14,12 +14,13 @@ final class AppState: ObservableObject {
 
     @Published var filter = GameFilter()
     @Published var games: [GameSummary] = []
+    @Published var libraryPath: [LibraryRoute] = []
     @Published var selectedGameID: UUID?
     @Published var isLoadingGames = false
     @Published var libraryError: String?
 
     @Published var importState: ImportRunState = .idle
-    @Published var importProgress = ImportProgress(total: 0, inserted: 0, skipped: 0)
+    @Published var importProgress = ImportProgress(total: 0, inserted: 0, skipped: 0, errors: 0)
     @Published var replayFens: [String] = []
     @Published var replaySans: [String] = []
     @Published var replayUcis: [String] = []
@@ -100,16 +101,14 @@ final class AppState: ObservableObject {
             games = fetched
 
             if let selectedGameID, !games.contains(where: { $0.id == selectedGameID }) {
-                self.selectedGameID = games.first?.id
-            } else if selectedGameID == nil {
-                selectedGameID = games.first?.id
+                self.selectedGameID = nil
+                clearReplayState()
             }
-
-            await loadReplayForSelectedGame()
         } catch {
             libraryError = error.localizedDescription
             games = []
             selectedGameID = nil
+            libraryPath = []
             clearReplayState()
         }
     }
@@ -127,7 +126,7 @@ final class AppState: ObservableObject {
 
     func startImport() async {
         importState = .running
-        importProgress = ImportProgress(total: 0, inserted: 0, skipped: 0)
+        importProgress = ImportProgress(total: 0, inserted: 0, skipped: 0, errors: 0)
 
         let pgnPaths = resolvedPgnPaths()
         guard !pgnPaths.isEmpty else {
@@ -139,12 +138,14 @@ final class AppState: ObservableObject {
         var total = 0
         var inserted = 0
         var skipped = 0
+        var errors = 0
 
         do {
             for pgnPath in pgnPaths {
                 let baseTotal = total
                 let baseInserted = inserted
                 let baseSkipped = skipped
+                let baseErrors = errors
 
                 let summary = try await importRepository.importPgn(
                     dbPath: databasePath,
@@ -154,7 +155,8 @@ final class AppState: ObservableObject {
                             self?.importProgress = ImportProgress(
                                 total: baseTotal + nextProgress.total,
                                 inserted: baseInserted + nextProgress.inserted,
-                                skipped: baseSkipped + nextProgress.skipped
+                                skipped: baseSkipped + nextProgress.skipped,
+                                errors: baseErrors + nextProgress.errors
                             )
                         }
                     }
@@ -163,12 +165,19 @@ final class AppState: ObservableObject {
                 total += summary.total
                 inserted += summary.inserted
                 skipped += summary.skipped
-                importProgress = ImportProgress(total: total, inserted: inserted, skipped: skipped)
+                errors += summary.errors
+                importProgress = ImportProgress(total: total, inserted: inserted, skipped: skipped, errors: errors)
             }
 
             let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
             importState = .success(
-                ImportSummary(total: total, inserted: inserted, skipped: skipped, durationMs: durationMs)
+                ImportSummary(
+                    total: total,
+                    inserted: inserted,
+                    skipped: skipped,
+                    errors: errors,
+                    durationMs: durationMs
+                )
             )
 
             if selectedSection == .library {
@@ -182,6 +191,32 @@ final class AppState: ObservableObject {
     func reloadReplayForCurrentSelection() {
         Task {
             await loadReplayForSelectedGame()
+        }
+    }
+
+    func selectGameForPreview(databaseID: Int64) {
+        selectGame(databaseID: databaseID)
+        reloadReplayForCurrentSelection()
+    }
+
+    func openGameExplorer(gameID: Int64) {
+        selectGame(databaseID: gameID)
+        let route = LibraryRoute.gameExplorer(gameID)
+        if libraryPath.last != route {
+            libraryPath.append(route)
+        }
+    }
+
+    func selectGame(databaseID: Int64) {
+        guard let game = games.first(where: { $0.databaseID == databaseID }) else {
+            selectedGameID = nil
+            clearReplayState()
+            return
+        }
+
+        if selectedGameID != game.id {
+            selectedGameID = game.id
+            clearReplayState()
         }
     }
 

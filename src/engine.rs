@@ -12,7 +12,10 @@ struct ParsedInfoLine {
     multipv: u32,
 }
 
-fn send_uci_command(stdin: &mut std::process::ChildStdin, command: &str) -> Result<(), EngineError> {
+fn send_uci_command(
+    stdin: &mut std::process::ChildStdin,
+    command: &str,
+) -> Result<(), EngineError> {
     writeln!(stdin, "{command}")?;
     stdin.flush()?;
     Ok(())
@@ -122,12 +125,18 @@ fn better_info(candidate: &ParsedInfoLine, best: &Option<ParsedInfoLine>) -> boo
             let candidate_depth = candidate.depth.unwrap_or(0);
             let current_depth = current.depth.unwrap_or(0);
             candidate_depth > current_depth
-                || (candidate_depth == current_depth && !candidate.pv.is_empty() && current.pv.is_empty())
+                || (candidate_depth == current_depth
+                    && !candidate.pv.is_empty()
+                    && current.pv.is_empty())
         }
     }
 }
 
-pub fn analyze_position(engine_path: &str, fen: &str, depth: u32) -> Result<EngineAnalysis, EngineError> {
+pub fn analyze_position(
+    engine_path: &str,
+    fen: &str,
+    depth: u32,
+) -> Result<EngineAnalysis, EngineError> {
     let depth = if depth == 0 { 18 } else { depth };
 
     let mut child = Command::new(engine_path)
@@ -135,7 +144,9 @@ pub fn analyze_position(engine_path: &str, fen: &str, depth: u32) -> Result<Engi
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| EngineError::Spawn(format!("failed to start engine '{engine_path}': {err}")))?;
+        .map_err(|err| {
+            EngineError::Spawn(format!("failed to start engine '{engine_path}': {err}"))
+        })?;
 
     let mut stdin = child
         .stdin

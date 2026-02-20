@@ -6,7 +6,7 @@ struct MockImportRepository: ImportRepository {
 
     init(
         simulatedDelayNanoseconds: UInt64 = 160_000_000,
-        finalSummary: ImportSummary = ImportSummary(total: 1250, inserted: 1236, skipped: 14, durationMs: 1920)
+        finalSummary: ImportSummary = ImportSummary(total: 1250, inserted: 1236, skipped: 14, errors: 0, durationMs: 1920)
     ) {
         self.simulatedDelayNanoseconds = simulatedDelayNanoseconds
         self.finalSummary = finalSummary
@@ -34,11 +34,13 @@ struct MockImportRepository: ImportRepository {
             try await Task.sleep(nanoseconds: simulatedDelayNanoseconds)
             let inserted = Int(Double(finalSummary.inserted) * fraction)
             let skipped = Int(Double(finalSummary.skipped) * fraction)
+            let errors = Int(Double(finalSummary.errors) * fraction)
             progress(
                 ImportProgress(
                     total: finalSummary.total,
                     inserted: inserted,
-                    skipped: skipped
+                    skipped: skipped,
+                    errors: errors
                 )
             )
         }

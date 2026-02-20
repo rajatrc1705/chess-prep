@@ -9,6 +9,7 @@ pub struct ImportSummary {
     pub total: usize,
     pub inserted: usize,
     pub skipped: usize,
+    pub errors: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

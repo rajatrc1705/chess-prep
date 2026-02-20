@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result as SqlResult};
 
 pub fn init_db(path: &str) -> SqlResult<()> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
 
     conn.execute_batch(
         "
@@ -25,6 +25,43 @@ pub fn init_db(path: &str) -> SqlResult<()> {
                 CREATE INDEX IF NOT EXISTS idx_games_site ON games(site);
         ",
     )?;
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "
+        DELETE FROM games
+        WHERE rowid NOT IN (
+            SELECT MIN(rowid)
+            FROM games
+            GROUP BY
+                COALESCE(event, ''),
+                COALESCE(site, ''),
+                COALESCE(date, ''),
+                COALESCE(white, ''),
+                COALESCE(black, ''),
+                COALESCE(result, ''),
+                COALESCE(eco, ''),
+                COALESCE(TRIM(pgn), '')
+        )
+        ",
+        [],
+    )?;
+    tx.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_games_exact_unique
+        ON games(
+            COALESCE(event, ''),
+            COALESCE(site, ''),
+            COALESCE(date, ''),
+            COALESCE(white, ''),
+            COALESCE(black, ''),
+            COALESCE(result, ''),
+            COALESCE(eco, ''),
+            COALESCE(TRIM(pgn), '')
+        );
+        ",
+    )?;
+    tx.commit()?;
 
     Ok(())
 }

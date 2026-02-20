@@ -37,7 +37,7 @@ struct ImportView: View {
                         .font(Typography.sectionTitle)
 
                     TextField(
-                        "Path to PGN file(s)",
+                        "Path to PGN/.zst file(s)",
                         text: Binding(
                             get: { state.pgnPath },
                             set: { value in
@@ -89,7 +89,7 @@ struct ImportView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        panel.allowedFileTypes = ["pgn"]
+        panel.allowedFileTypes = ["pgn", "zst"]
 
         if panel.runModal() == .OK {
             let paths = panel.urls.map { $0.path(percentEncoded: false) }
@@ -129,8 +129,13 @@ struct ImportStatusView: View {
                 .font(Typography.sectionTitle)
                 .foregroundStyle(Theme.textPrimary)
 
-            ProgressView(value: state.importProgress.completion)
-                .tint(Theme.accent)
+            if state.isImportRunning {
+                ProgressView()
+                    .tint(Theme.accent)
+            } else {
+                ProgressView(value: state.importProgress.completion)
+                    .tint(Theme.accent)
+            }
 
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
                 GridRow {
@@ -152,6 +157,13 @@ struct ImportStatusView: View {
                     Text("\(state.importProgress.skipped)")
                         .font(Typography.dataMono)
                         .foregroundStyle(Theme.error)
+                }
+                GridRow {
+                    Text("Errors")
+                        .font(Typography.detailLabel)
+                    Text("\(state.importProgress.errors)")
+                        .font(Typography.dataMono)
+                        .foregroundStyle(Theme.textSecondary)
                 }
             }
 

@@ -51,6 +51,7 @@ fn import_latency_guardrail() {
     assert_eq!(summary.total, game_count);
     assert_eq!(summary.inserted, game_count);
     assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.errors, 0);
 
     let max_ms = threshold_ms("CHESS_PREP_PERF_IMPORT_MAX_MS", 12_000);
     assert!(

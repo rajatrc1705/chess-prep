@@ -6,7 +6,7 @@ import XCTest
 @MainActor
 final class AppStateTests: XCTestCase {
     func testImportTransitionsToSuccess() async {
-        let expected = ImportSummary(total: 40, inserted: 39, skipped: 1, durationMs: 88)
+        let expected = ImportSummary(total: 40, inserted: 39, skipped: 1, errors: 2, durationMs: 88)
 
         let state = AppState(
             gameRepository: MockGameRepository(seedGames: []),
@@ -30,10 +30,12 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(summary.total, expected.total)
         XCTAssertEqual(summary.inserted, expected.inserted)
         XCTAssertEqual(summary.skipped, expected.skipped)
+        XCTAssertEqual(summary.errors, expected.errors)
         XCTAssertGreaterThanOrEqual(summary.durationMs, 0)
         XCTAssertEqual(state.importProgress.total, expected.total)
         XCTAssertEqual(state.importProgress.inserted, expected.inserted)
         XCTAssertEqual(state.importProgress.skipped, expected.skipped)
+        XCTAssertEqual(state.importProgress.errors, expected.errors)
     }
 
     func testSelectedGameTracksSelectedGameID() async throws {
@@ -65,6 +67,35 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.games.allSatisfy {
             "\($0.white) \($0.black) \($0.event) \($0.site)".localizedCaseInsensitiveContains("carlsen")
         })
+    }
+
+    func testLoadGamesDoesNotAutoSelectGame() async {
+        let state = AppState(
+            gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
+            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
+            replayRepository: MockReplayRepository()
+        )
+
+        await state.loadGames()
+
+        XCTAssertNil(state.selectedGameID)
+        XCTAssertNil(state.selectedGame)
+    }
+
+    func testOpenGameExplorerPushesLibraryRouteAndSelectsGame() async throws {
+        let state = AppState(
+            gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
+            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
+            replayRepository: MockReplayRepository()
+        )
+
+        await state.loadGames()
+        let candidate = try XCTUnwrap(state.games.dropFirst().first)
+
+        state.openGameExplorer(gameID: candidate.databaseID)
+
+        XCTAssertEqual(state.selectedGameID, candidate.id)
+        XCTAssertEqual(state.libraryPath.last, .gameExplorer(candidate.databaseID))
     }
 }
 #endif

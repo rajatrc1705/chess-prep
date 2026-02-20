@@ -1,6 +1,6 @@
 use chess_prep::{
     GameFilter, GameResultFilter, Pagination, analyze_position, count_games, import_pgn_file,
-    init_db, replay_game, replay_game_fens, search_games,
+    import_pgn_file_with_progress, init_db, replay_game, replay_game_fens, search_games,
 };
 use std::env;
 
@@ -143,18 +143,24 @@ fn run() -> Result<(), String> {
                 format!("failed to import PGN file '{pgn_path}' into '{db_path}': {err:?}")
             })?;
             println!(
-                "Imported {} game(s) from '{}' into '{}' (inserted: {}, skipped: {})",
-                summary.total, pgn_path, db_path, summary.inserted, summary.skipped
+                "Imported {} game(s) from '{}' into '{}' (inserted: {}, skipped: {}, errors: {})",
+                summary.total, pgn_path, db_path, summary.inserted, summary.skipped, summary.errors
             );
             Ok(())
         }
         [_, command, db_path, pgn_path, tsv] if command == "import" && tsv == "--tsv" => {
-            let summary = import_pgn_file(db_path, pgn_path).map_err(|err| {
+            let summary = import_pgn_file_with_progress(db_path, pgn_path, |progress| {
+                println!(
+                    "progress\t{}\t{}\t{}\t{}",
+                    progress.total, progress.inserted, progress.skipped, progress.errors
+                );
+            })
+            .map_err(|err| {
                 format!("failed to import PGN file '{pgn_path}' into '{db_path}': {err:?}")
             })?;
             println!(
-                "{}\t{}\t{}",
-                summary.total, summary.inserted, summary.skipped
+                "summary\t{}\t{}\t{}\t{}",
+                summary.total, summary.inserted, summary.skipped, summary.errors
             );
             Ok(())
         }

@@ -2,6 +2,7 @@ use chess_prep::{import_pgn_file, init_db};
 use rusqlite::{Connection, params};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -98,6 +99,7 @@ fn import_pgn_file_inserts_games_and_tags() {
     assert_eq!(summary.total, 2, "should parse 2 games");
     assert_eq!(summary.inserted, 2, "should insert 2 games");
     assert_eq!(summary.skipped, 0, "should skip 0 games");
+    assert_eq!(summary.errors, 0, "should have 0 parse errors");
 
     let conn = Connection::open(&db_path).expect("should open initialized database");
     let count: i64 = conn
@@ -238,11 +240,13 @@ fn reimport_skips_exact_duplicate_game_rows() {
     assert_eq!(first.total, 1);
     assert_eq!(first.inserted, 1);
     assert_eq!(first.skipped, 0);
+    assert_eq!(first.errors, 0);
 
     let second = import_pgn_file(db_path_str, pgn_path_str).expect("second import should work");
     assert_eq!(second.total, 1);
     assert_eq!(second.inserted, 0, "duplicate row should not be inserted");
     assert_eq!(second.skipped, 1);
+    assert_eq!(second.errors, 0);
 
     let conn = Connection::open(db_path_str).expect("should open db");
     let count: i64 = conn
@@ -294,6 +298,8 @@ fn import_cleans_up_existing_exact_duplicates_with_movetext() {
 
     init_db(db_path_str).expect("init_db should create schema");
     let conn = Connection::open(db_path_str).expect("should open initialized database");
+    conn.execute("DROP INDEX IF EXISTS idx_games_exact_unique", [])
+        .expect("should drop unique index for legacy duplicate setup");
 
     // Seed two identical rows with movetext (legacy duplicate scenario).
     let duplicate_movetext = "e4 d5 exd5 Qxd5";
@@ -338,6 +344,119 @@ fn import_cleans_up_existing_exact_duplicates_with_movetext() {
         )
         .expect("should count deduped rows");
     assert_eq!(count, 1, "legacy exact duplicates should be cleaned");
+
+    fs::remove_file(db_path).expect("should clean up temp db file");
+    fs::remove_file(pgn_path).expect("should clean up temp PGN file");
+}
+
+#[test]
+fn import_pgn_zst_file_inserts_games() {
+    if Command::new("zstd").arg("--version").output().is_err() {
+        eprintln!("zstd binary not available; skipping zst import test");
+        return;
+    }
+
+    let db_path = unique_temp_db_path();
+    let plain_pgn_path = unique_temp_pgn_path();
+    let pgn_path = unique_temp_path("chess_prep_test_zst", "pgn.zst");
+
+    let pgn = r#"[Event "Compressed Game"]
+[Site "Online"]
+[Date "2024.04.04"]
+[White "Alpha"]
+[Black "Beta"]
+[Result "1-0"]
+[ECO "C44"]
+
+1. e4 e5 2. Nf3 Nc6 1-0
+"#;
+
+    fs::write(&plain_pgn_path, pgn).expect("should write plain PGN");
+    let status = Command::new("zstd")
+        .arg("-f")
+        .arg(&plain_pgn_path)
+        .arg("-o")
+        .arg(&pgn_path)
+        .status()
+        .expect("should run zstd");
+    assert!(status.success(), "zstd should compress PGN");
+    let db_path_str = db_path
+        .to_str()
+        .expect("temp db path should be valid UTF-8");
+    let pgn_path_str = pgn_path
+        .to_str()
+        .expect("temp PGN path should be valid UTF-8");
+
+    init_db(db_path_str).expect("init_db should create schema");
+    let summary = import_pgn_file(db_path_str, pgn_path_str).expect("zst import should work");
+
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.inserted, 1);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.errors, 0);
+
+    fs::remove_file(db_path).expect("should clean up temp db file");
+    fs::remove_file(plain_pgn_path).expect("should clean up plain PGN file");
+    fs::remove_file(pgn_path).expect("should clean up temp PGN file");
+}
+
+#[test]
+fn import_skips_malformed_game_and_continues() {
+    let db_path = unique_temp_db_path();
+    let pgn_path = unique_temp_pgn_path();
+
+    let pgn = r#"[Event "Good One"]
+[Site "Online"]
+[Date "2024.05.01"]
+[White "A"]
+[Black "B"]
+[Result "1-0"]
+[ECO "C20"]
+
+1. e4 e5 2. Nf3 Nc6 1-0
+
+[Event "Broken"]
+[Site "Online"]
+[Date "2024.05.02"]
+[White "C"]
+[Black "D"]
+[Result "0-1"]
+[ECO "B01"]
+
+1. e4 {unclosed comment
+
+[Event "Good Two"]
+[Site "Online"]
+[Date "2024.05.03"]
+[White "E"]
+[Black "F"]
+[Result "1/2-1/2"]
+[ECO "C00"]
+
+1. d4 d5 2. c4 e6 1/2-1/2
+"#;
+
+    fs::write(&pgn_path, pgn).expect("should write temp PGN");
+    let db_path_str = db_path
+        .to_str()
+        .expect("temp db path should be valid UTF-8");
+    let pgn_path_str = pgn_path
+        .to_str()
+        .expect("temp PGN path should be valid UTF-8");
+
+    init_db(db_path_str).expect("init_db should create schema");
+    let summary = import_pgn_file(db_path_str, pgn_path_str).expect("import should continue");
+
+    assert_eq!(summary.total, 3);
+    assert_eq!(summary.inserted, 2);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.errors, 1);
+
+    let conn = Connection::open(db_path_str).expect("should open db");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
+        .expect("should count games");
+    assert_eq!(count, 2);
 
     fs::remove_file(db_path).expect("should clean up temp db file");
     fs::remove_file(pgn_path).expect("should clean up temp PGN file");
