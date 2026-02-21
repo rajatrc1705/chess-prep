@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ImportView: View {
     @ObservedObject var state: AppState
+    @State private var databasePathInput = ""
 
     var body: some View {
         ScrollView {
@@ -15,65 +16,132 @@ struct ImportView: View {
                     .font(Typography.body)
                     .foregroundStyle(Theme.textSecondary)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Database")
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Import Games")
                         .font(Typography.sectionTitle)
 
-                    TextField(
-                        "Path to SQLite database",
-                        text: $state.databasePath
-                    )
-                    .textFieldStyle(.roundedBorder)
+                    Text("Choose target database, select PGN files, then run import.")
+                        .font(Typography.body)
+                        .foregroundStyle(Theme.textSecondary)
 
-                    Button("Select Database File") {
-                        selectDatabasePath()
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .panelCard()
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("PGN Source")
-                        .font(Typography.sectionTitle)
-
-                    TextField(
-                        "Path to PGN/.zst file(s)",
-                        text: Binding(
-                            get: { state.pgnPath },
-                            set: { value in
-                                state.pgnPath = value
-                                state.selectedPgnPaths = []
-                            }
-                        )
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    Button("Select PGN File(s)") {
-                        selectPgnPaths()
-                    }
-                    .buttonStyle(.bordered)
-
-                    if state.selectedPgnPaths.count > 1 {
-                        Text("\(state.selectedPgnPaths.count) PGN files selected for batch import.")
-                            .font(Typography.body)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("1. Target Database")
+                            .font(Typography.detailLabel)
                             .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-                .panelCard()
 
-                HStack(spacing: 12) {
-                    Button("Run Import") {
-                        Task {
-                            await state.startImport()
+                        HStack(spacing: 10) {
+                            if state.workspaceDatabases.isEmpty {
+                                Text("Register a database first")
+                                    .font(Typography.body)
+                                    .foregroundStyle(Theme.error)
+                            } else {
+                                Picker(
+                                    "Import Target",
+                                    selection: Binding(
+                                        get: { state.selectedImportDatabaseID },
+                                        set: { state.selectedImportDatabaseID = $0 }
+                                    )
+                                ) {
+                                    ForEach(state.workspaceDatabases) { database in
+                                        Text(database.label).tag(Optional(database.id))
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                            }
+                            Spacer(minLength: 0)
+                        }
+
+                        if let target = state.selectedImportDatabase {
+                            Text(target.path)
+                                .font(Typography.dataMono)
+                                .foregroundStyle(Theme.textSecondary)
+                                .lineLimit(1)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
 
-                    if state.isImportRunning {
-                        ProgressView()
-                            .scaleEffect(0.8)
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("2. PGN Files")
+                            .font(Typography.detailLabel)
+                            .foregroundStyle(Theme.textSecondary)
+
+                        if state.selectedPgnPaths.isEmpty {
+                            Text("No files selected")
+                                .font(Typography.body)
+                                .foregroundStyle(Theme.textSecondary)
+                        } else if state.selectedPgnPaths.count == 1 {
+                            Text(state.selectedPgnPaths[0])
+                                .font(Typography.dataMono)
+                                .foregroundStyle(Theme.textSecondary)
+                                .lineLimit(1)
+                        } else {
+                            Text("\(state.selectedPgnPaths.count) files selected")
+                                .font(Typography.body)
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+
+                        HStack(spacing: 10) {
+                            Button("Select PGN File(s)") {
+                                selectPgnPaths()
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("Clear Selection") {
+                                clearPgnSelection()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(state.selectedPgnPaths.isEmpty)
+
+                            Button("Run Import") {
+                                Task {
+                                    await state.startImport()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(state.selectedImportDatabase == nil || state.selectedPgnPaths.isEmpty)
+                        }
+
+                        if state.isImportRunning {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text("Importing...")
+                                    .font(Typography.detailLabel)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
                     }
                 }
+                .panelCard()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Database Registry")
+                        .font(Typography.sectionTitle)
+
+                    TextField("Path to SQLite database", text: $databasePathInput)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 10) {
+                        Button("Register Path") {
+                            state.registerDatabase(path: databasePathInput)
+                            databasePathInput = ""
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Select Database File") {
+                            selectDatabasePath()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    if let workspaceError = state.workspaceError {
+                        Text(workspaceError)
+                            .font(Typography.body)
+                            .foregroundStyle(Theme.error)
+                    }
+                }
+                .panelCard()
             }
             .padding(24)
         }
@@ -81,6 +149,11 @@ struct ImportView: View {
         .tint(Theme.accent)
         .environment(\.colorScheme, .light)
         .background(Theme.background)
+    }
+
+    private func clearPgnSelection() {
+        state.selectedPgnPaths = []
+        state.pgnPath = ""
     }
 
     private func selectPgnPaths() {
@@ -115,7 +188,7 @@ struct ImportView: View {
         panel.allowedFileTypes = ["sqlite", "sqlite3", "db"]
 
         if panel.runModal() == .OK, let url = panel.url {
-            state.databasePath = url.path(percentEncoded: false)
+            state.registerDatabase(path: url.path(percentEncoded: false))
         }
     }
 }

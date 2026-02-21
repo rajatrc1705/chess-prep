@@ -7,18 +7,63 @@ struct MockGameRepository: GameRepository {
         self.seedGames = seedGames
     }
 
-    func fetchGames(dbPath: String, filter: GameFilter) async throws -> [GameSummary] {
-        _ = dbPath
+    func fetchGames(databases: [WorkspaceDatabase], filter: GameFilter) async throws -> [GameSummary] {
         try await Task.sleep(for: .milliseconds(110))
 
+        let activeDatabasePaths = Set(
+            databases
+                .filter { $0.isActive && $0.isAvailable }
+                .map { normalizePath($0.path) }
+        )
+
+        guard !activeDatabasePaths.isEmpty else {
+            return []
+        }
+
         return seedGames
+            .filter { activeDatabasePaths.contains(normalizePath($0.sourceDatabasePath)) }
             .filter { filter.matches($0) }
-            .sorted { $0.date > $1.date }
+            .sorted { lhs, rhs in
+                if lhs.date != rhs.date {
+                    return lhs.date > rhs.date
+                }
+                if lhs.sourceDatabasePath != rhs.sourceDatabasePath {
+                    return lhs.sourceDatabasePath < rhs.sourceDatabasePath
+                }
+                return lhs.databaseID > rhs.databaseID
+            }
     }
+
+    private func normalizePath(_ path: String) -> String {
+        RustBridge.expandTilde(path).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static let previewDatabaseA = WorkspaceDatabase(
+        id: UUID(uuidString: "CE80CF80-B862-4E3A-BA0A-38A344F07F73")!,
+        label: "Main DB",
+        path: "/tmp/chess-prep-main.sqlite",
+        isActive: true,
+        isAvailable: true,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+
+    static let previewDatabaseB = WorkspaceDatabase(
+        id: UUID(uuidString: "8CF5BEF7-C74A-406E-B0B4-08DEBDA53B3E")!,
+        label: "Secondary DB",
+        path: "/tmp/chess-prep-secondary.sqlite",
+        isActive: true,
+        isAvailable: true,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
 
     static let previewGames: [GameSummary] = [
         GameSummary(
             id: UUID(uuidString: "80CFCE80-B862-4E3A-BA0A-38A344F07F73")!,
+            sourceDatabaseID: previewDatabaseA.id,
+            sourceDatabaseLabel: previewDatabaseA.label,
+            sourceDatabasePath: previewDatabaseA.path,
             databaseID: 1,
             white: "Carlsen, Magnus",
             black: "Nepomniachtchi, Ian",
@@ -30,6 +75,9 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "71D49E03-75A4-474E-BC30-A7D6A8A4FC30")!,
+            sourceDatabaseID: previewDatabaseA.id,
+            sourceDatabaseLabel: previewDatabaseA.label,
+            sourceDatabasePath: previewDatabaseA.path,
             databaseID: 2,
             white: "Gukesh, D",
             black: "Caruana, Fabiano",
@@ -41,6 +89,9 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "B7D2A9A5-3FE0-4135-8D72-B9E8A2D2737E")!,
+            sourceDatabaseID: previewDatabaseB.id,
+            sourceDatabaseLabel: previewDatabaseB.label,
+            sourceDatabasePath: previewDatabaseB.path,
             databaseID: 3,
             white: "Kramnik, Vladimir",
             black: "Anand, Viswanathan",
@@ -52,6 +103,9 @@ struct MockGameRepository: GameRepository {
         ),
         GameSummary(
             id: UUID(uuidString: "32929A2A-1904-40E9-9A6E-6206424D10CB")!,
+            sourceDatabaseID: previewDatabaseB.id,
+            sourceDatabaseLabel: previewDatabaseB.label,
+            sourceDatabasePath: previewDatabaseB.path,
             databaseID: 4,
             white: "Alice",
             black: "Bob",
@@ -62,7 +116,10 @@ struct MockGameRepository: GameRepository {
             site: "Berlin"
         ),
         GameSummary(
-            id: UUID(uuidString: "8CF5BEF7-C74A-406E-B0B4-08DEBDA53B3E")!,
+            id: UUID(uuidString: "8AF5BEF7-C74A-406E-B0B4-08DEBDA53B3E")!,
+            sourceDatabaseID: previewDatabaseB.id,
+            sourceDatabaseLabel: previewDatabaseB.label,
+            sourceDatabasePath: previewDatabaseB.path,
             databaseID: 5,
             white: "Carol",
             black: "Dave",

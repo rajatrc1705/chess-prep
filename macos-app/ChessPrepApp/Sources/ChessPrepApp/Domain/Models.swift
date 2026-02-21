@@ -25,10 +25,6 @@ enum AppSection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum LibraryRoute: Hashable, Sendable {
-    case gameExplorer(Int64)
-}
-
 enum GameResultFilter: String, CaseIterable, Identifiable, Sendable {
     case any = "Any"
     case whiteWin = "1-0"
@@ -38,8 +34,30 @@ enum GameResultFilter: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
+struct WorkspaceDatabase: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var label: String
+    var path: String
+    var isActive: Bool
+    var isAvailable: Bool
+    var createdAt: Date
+    var updatedAt: Date
+}
+
+struct GameLocator: Hashable, Sendable {
+    let sourceDatabasePath: String
+    let databaseID: Int64
+}
+
+enum LibraryRoute: Hashable, Sendable {
+    case gameExplorer(GameLocator)
+}
+
 struct GameSummary: Identifiable, Equatable, Sendable {
     let id: UUID
+    let sourceDatabaseID: UUID
+    let sourceDatabaseLabel: String
+    let sourceDatabasePath: String
     let databaseID: Int64
     let white: String
     let black: String
@@ -48,6 +66,10 @@ struct GameSummary: Identifiable, Equatable, Sendable {
     let eco: String
     let event: String
     let site: String
+
+    var locator: GameLocator {
+        GameLocator(sourceDatabasePath: sourceDatabasePath, databaseID: databaseID)
+    }
 }
 
 struct GameFilter: Equatable, Sendable {

@@ -5,16 +5,16 @@ import AppKit
 
 struct GameDetailView: View {
     @ObservedObject var state: AppState
-    let databaseGameID: Int64?
+    let locator: GameLocator?
     @State private var whiteAtBottom = true
     @FocusState private var replayFocused: Bool
 
     private let boardCellSize: CGFloat = 60
     private let explorerColumnMaxWidth: CGFloat = 1180
 
-    init(state: AppState, databaseGameID: Int64? = nil) {
+    init(state: AppState, locator: GameLocator? = nil) {
         self.state = state
-        self.databaseGameID = databaseGameID
+        self.locator = locator
     }
 
     var body: some View {
@@ -48,14 +48,14 @@ struct GameDetailView: View {
         .focused($replayFocused)
         .onAppear {
             replayFocused = true
-            if let databaseGameID {
-                state.selectGame(databaseID: databaseGameID)
+            if let locator {
+                state.selectGame(locator: locator)
                 state.reloadReplayForCurrentSelection()
             }
         }
-        .onChange(of: databaseGameID) { _, nextID in
-            guard let nextID else { return }
-            state.selectGame(databaseID: nextID)
+        .onChange(of: locator) { _, nextLocator in
+            guard let nextLocator else { return }
+            state.selectGame(locator: nextLocator)
             state.reloadReplayForCurrentSelection()
         }
         .onChange(of: state.selectedGameID) { _, _ in
@@ -77,6 +77,7 @@ struct GameDetailView: View {
                 metadataChip(title: "Result", value: game.result, width: 92)
                 metadataChip(title: "Date", value: game.date, width: 112)
                 metadataChip(title: "ECO", value: game.eco, width: 78)
+                metadataChip(title: "DB", value: game.sourceDatabaseLabel, width: 126)
                 metadataChip(title: "Event", value: game.event)
                 metadataChip(title: "Site", value: game.site)
             }

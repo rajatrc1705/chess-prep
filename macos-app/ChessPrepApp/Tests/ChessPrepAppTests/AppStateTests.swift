@@ -5,10 +5,34 @@ import XCTest
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    private func makeState(
+        gameRepository: any GameRepository = MockGameRepository(seedGames: MockGameRepository.previewGames),
+        importRepository: any ImportRepository = MockImportRepository(simulatedDelayNanoseconds: 0),
+        replayRepository: any ReplayRepository = MockReplayRepository()
+    ) -> AppState {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("workspace-tests-\(UUID().uuidString).json")
+        let store = WorkspaceStore(url: tempURL)
+        let state = AppState(
+            gameRepository: gameRepository,
+            importRepository: importRepository,
+            replayRepository: replayRepository,
+            workspaceStore: store
+        )
+        _ = FileManager.default.createFile(atPath: MockGameRepository.previewDatabaseA.path, contents: Data())
+        _ = FileManager.default.createFile(atPath: MockGameRepository.previewDatabaseB.path, contents: Data())
+        state.workspaceDatabases = [
+            MockGameRepository.previewDatabaseA,
+            MockGameRepository.previewDatabaseB,
+        ]
+        state.selectedImportDatabaseID = MockGameRepository.previewDatabaseA.id
+        return state
+    }
+
     func testImportTransitionsToSuccess() async {
         let expected = ImportSummary(total: 40, inserted: 39, skipped: 1, errors: 2, durationMs: 88)
 
-        let state = AppState(
+        let state = makeState(
             gameRepository: MockGameRepository(seedGames: []),
             importRepository: MockImportRepository(
                 simulatedDelayNanoseconds: 0,
@@ -16,8 +40,6 @@ final class AppStateTests: XCTestCase {
             ),
             replayRepository: MockReplayRepository()
         )
-
-        state.databasePath = "/tmp/chess-prep.sqlite"
         state.pgnPath = "/tmp/sample.pgn"
 
         await state.startImport()
@@ -39,12 +61,7 @@ final class AppStateTests: XCTestCase {
     }
 
     func testSelectedGameTracksSelectedGameID() async throws {
-        let state = AppState(
-            gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
-            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
-            replayRepository: MockReplayRepository()
-        )
-
+        let state = makeState()
         await state.loadGames()
 
         let candidate = try XCTUnwrap(state.games.dropFirst().first)
@@ -54,13 +71,9 @@ final class AppStateTests: XCTestCase {
     }
 
     func testLoadGamesAppliesFilterFromState() async {
-        let state = AppState(
-            gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
-            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
-            replayRepository: MockReplayRepository()
-        )
-
+        let state = makeState()
         state.filter.searchText = "Carlsen"
+
         await state.loadGames()
 
         XCTAssertFalse(state.games.isEmpty)
@@ -70,12 +83,7 @@ final class AppStateTests: XCTestCase {
     }
 
     func testLoadGamesDoesNotAutoSelectGame() async {
-        let state = AppState(
-            gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
-            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
-            replayRepository: MockReplayRepository()
-        )
-
+        let state = makeState()
         await state.loadGames()
 
         XCTAssertNil(state.selectedGameID)
@@ -83,19 +91,25 @@ final class AppStateTests: XCTestCase {
     }
 
     func testOpenGameExplorerPushesLibraryRouteAndSelectsGame() async throws {
-        let state = AppState(
-            gameRepository: MockGameRepository(seedGames: MockGameRepository.previewGames),
-            importRepository: MockImportRepository(simulatedDelayNanoseconds: 0),
-            replayRepository: MockReplayRepository()
-        )
-
+        let state = makeState()
         await state.loadGames()
         let candidate = try XCTUnwrap(state.games.dropFirst().first)
 
-        state.openGameExplorer(gameID: candidate.databaseID)
+        state.openGameExplorer(locator: candidate.locator)
 
         XCTAssertEqual(state.selectedGameID, candidate.id)
-        XCTAssertEqual(state.libraryPath.last, .gameExplorer(candidate.databaseID))
+        XCTAssertEqual(state.libraryPath.last, .gameExplorer(candidate.locator))
+    }
+
+    func testLoadGamesRespectsActiveDatabaseSelection() async {
+        let state = makeState()
+        state.workspaceDatabases[0].isActive = false
+        state.workspaceDatabases[1].isActive = true
+
+        await state.loadGames()
+
+        XCTAssertFalse(state.games.isEmpty)
+        XCTAssertTrue(state.games.allSatisfy { $0.sourceDatabaseID == MockGameRepository.previewDatabaseB.id })
     }
 }
 #endif

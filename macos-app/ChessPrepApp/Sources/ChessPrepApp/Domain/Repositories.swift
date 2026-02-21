@@ -15,7 +15,7 @@ enum RepositoryError: Error, LocalizedError, Equatable, Sendable {
 }
 
 protocol GameRepository: Sendable {
-    func fetchGames(dbPath: String, filter: GameFilter) async throws -> [GameSummary]
+    func fetchGames(databases: [WorkspaceDatabase], filter: GameFilter) async throws -> [GameSummary]
 }
 
 protocol ImportRepository: Sendable {

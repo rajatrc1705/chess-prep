@@ -11,7 +11,7 @@ struct LibraryView: View {
                         .font(Typography.title)
                         .foregroundStyle(Theme.textPrimary)
 
-                    Text("\(state.games.count) games shown")
+                    Text("\(state.games.count) games shown (\(state.activeDatabaseCount) DBs active)")
                         .font(Typography.body)
                         .foregroundStyle(Theme.textSecondary)
                 }
@@ -102,6 +102,8 @@ struct LibraryView: View {
                 .frame(width: 92, alignment: .leading)
             Text("ECO")
                 .frame(width: 52, alignment: .leading)
+            Text("DB")
+                .frame(width: 120, alignment: .leading)
             Text("Event")
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -131,6 +133,9 @@ struct LibraryView: View {
             Text(game.eco)
                 .font(Typography.dataMono)
                 .frame(width: 52, alignment: .leading)
+            Text(game.sourceDatabaseLabel)
+                .lineLimit(1)
+                .frame(width: 120, alignment: .leading)
             Text(game.event)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -148,10 +153,10 @@ struct LibraryView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            state.openGameExplorer(gameID: game.databaseID)
+            state.openGameExplorer(locator: game.locator)
         }
         .onTapGesture {
-            state.selectGameForPreview(databaseID: game.databaseID)
+            state.selectGameForPreview(locator: game.locator)
         }
     }
 }

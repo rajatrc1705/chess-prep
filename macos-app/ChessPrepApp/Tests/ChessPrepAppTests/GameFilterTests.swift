@@ -7,6 +7,9 @@ final class GameFilterTests: XCTestCase {
     func testFilterMatchesCompositeCriteria() {
         let game = GameSummary(
             id: UUID(),
+            sourceDatabaseID: UUID(),
+            sourceDatabaseLabel: "Main",
+            sourceDatabasePath: "/tmp/main.sqlite",
             databaseID: 1,
             white: "Alice",
             black: "Bob",
@@ -29,6 +32,9 @@ final class GameFilterTests: XCTestCase {
     func testFilterRejectsOnMismatchedResult() {
         let game = GameSummary(
             id: UUID(),
+            sourceDatabaseID: UUID(),
+            sourceDatabaseLabel: "Main",
+            sourceDatabasePath: "/tmp/main.sqlite",
             databaseID: 2,
             white: "Carol",
             black: "Dave",
@@ -48,6 +54,9 @@ final class GameFilterTests: XCTestCase {
     func testFilterMatchesWithinDateRange() {
         let game = GameSummary(
             id: UUID(),
+            sourceDatabaseID: UUID(),
+            sourceDatabaseLabel: "Main",
+            sourceDatabasePath: "/tmp/main.sqlite",
             databaseID: 3,
             white: "Eve",
             black: "Frank",
@@ -68,6 +77,9 @@ final class GameFilterTests: XCTestCase {
     func testFilterRejectsBeforeDateFrom() {
         let game = GameSummary(
             id: UUID(),
+            sourceDatabaseID: UUID(),
+            sourceDatabaseLabel: "Main",
+            sourceDatabasePath: "/tmp/main.sqlite",
             databaseID: 4,
             white: "Gina",
             black: "Hank",
@@ -87,6 +99,9 @@ final class GameFilterTests: XCTestCase {
     func testFilterRejectsAfterDateTo() {
         let game = GameSummary(
             id: UUID(),
+            sourceDatabaseID: UUID(),
+            sourceDatabaseLabel: "Main",
+            sourceDatabasePath: "/tmp/main.sqlite",
             databaseID: 5,
             white: "Ivy",
             black: "Jack",

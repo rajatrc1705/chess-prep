@@ -85,6 +85,13 @@ struct GamePreviewView: View {
                             .font(Typography.body)
                             .lineLimit(1)
                     }
+                    GridRow {
+                        Text("Database")
+                            .font(Typography.detailLabel)
+                        Text(game.sourceDatabaseLabel)
+                            .font(Typography.body)
+                            .lineLimit(1)
+                    }
                 }
             }
 
@@ -115,7 +122,7 @@ struct GamePreviewView: View {
             }
 
             Button("Open Game Explorer") {
-                state.openGameExplorer(gameID: game.databaseID)
+                state.openGameExplorer(game: game)
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.accent)

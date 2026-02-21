@@ -227,4 +227,25 @@ enum RustBridge {
         let uuidString = "00000000-0000-0000-\(part4)-\(part5)"
         return UUID(uuidString: uuidString) ?? UUID()
     }
+
+    static func stableUUID(for key: String) -> UUID {
+        // Deterministic 128-bit digest from UTF-8 bytes.
+        let bytes = Array(key.utf8)
+        var high: UInt64 = 0xcbf29ce484222325
+        var low: UInt64 = 0x84222325cbf29ce4
+
+        for byte in bytes {
+            high ^= UInt64(byte)
+            high &*= 0x100000001b3
+        }
+
+        for byte in bytes.reversed() {
+            low ^= UInt64(byte)
+            low &*= 0x100000001b3
+        }
+
+        let hex = String(format: "%016llx%016llx", high, low)
+        let uuidString = "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
+        return UUID(uuidString: uuidString) ?? UUID()
+    }
 }

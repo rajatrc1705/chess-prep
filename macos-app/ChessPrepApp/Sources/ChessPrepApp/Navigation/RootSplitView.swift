@@ -72,6 +72,57 @@ struct RootSplitView: View {
                     .foregroundStyle(Theme.textOnBrown.opacity(0.85))
             }
 
+            Section {
+                if state.workspaceDatabases.isEmpty {
+                    Text("No databases registered")
+                        .foregroundStyle(Theme.textOnBrown.opacity(0.8))
+                        .listRowBackground(Theme.sidebarBackground)
+                } else {
+                    ForEach(state.workspaceDatabases) { database in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Toggle(
+                                    isOn: Binding(
+                                        get: { database.isActive },
+                                        set: { state.setDatabaseActive(id: database.id, isActive: $0) }
+                                    )
+                                ) {
+                                    Text(database.label)
+                                        .foregroundStyle(Theme.textOnBrown)
+                                        .lineLimit(1)
+                                }
+                                .toggleStyle(.checkbox)
+
+                                Spacer()
+
+                                Button {
+                                    state.removeDatabase(id: database.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(Theme.textOnBrown.opacity(0.8))
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Text(database.path)
+                                .font(Typography.detailLabel)
+                                .foregroundStyle(Theme.textOnBrown.opacity(0.75))
+                                .lineLimit(1)
+
+                            if !database.isAvailable {
+                                Text("Unavailable")
+                                    .font(Typography.detailLabel)
+                                    .foregroundStyle(Theme.error)
+                            }
+                        }
+                        .listRowBackground(Theme.sidebarBackground)
+                    }
+                }
+            } header: {
+                Text("Databases (\(state.activeDatabaseCount) active)")
+                    .foregroundStyle(Theme.textOnBrown.opacity(0.85))
+            }
+
             if state.selectedSection == .library {
                 Section {
                     sidebarTextField(
@@ -222,8 +273,8 @@ struct RootSplitView: View {
                 LibraryView(state: state)
                     .navigationDestination(for: LibraryRoute.self) { route in
                         switch route {
-                        case .gameExplorer(let gameID):
-                            GameDetailView(state: state, databaseGameID: gameID)
+                        case .gameExplorer(let locator):
+                            GameDetailView(state: state, locator: locator)
                         }
                     }
             }
