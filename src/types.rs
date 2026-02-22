@@ -118,12 +118,61 @@ pub enum EngineError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineLine {
+    pub multipv_rank: u32,
+    pub depth: u32,
+    pub score_cp: Option<i32>,
+    pub score_mate: Option<i32>,
+    pub pv: Vec<String>,
+    pub san_pv: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineAnalysis {
     pub depth: u32,
     pub score_cp: Option<i32>,
     pub score_mate: Option<i32>,
     pub bestmove: Option<String>,
     pub pv: Vec<String>,
+    pub lines: Vec<EngineLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisWorkspaceNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub san: Option<String>,
+    pub uci: Option<String>,
+    pub fen: String,
+    pub comment: String,
+    pub nags: Vec<String>,
+    pub sort_index: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisWorkspaceSummary {
+    pub id: i64,
+    pub source_db_path: String,
+    pub game_id: i64,
+    pub name: String,
+    pub root_node_id: String,
+    pub current_node_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedAnalysisWorkspace {
+    pub workspace: AnalysisWorkspaceSummary,
+    pub nodes: Vec<AnalysisWorkspaceNode>,
+}
+
+#[derive(Debug)]
+pub enum AnalysisWorkspaceError {
+    Sql(rusqlite::Error),
+    Io(std::io::Error),
+    NotFound(i64),
+    InvalidInput(String),
 }
 
 impl From<std::io::Error> for ImportError {
@@ -153,5 +202,17 @@ impl From<rusqlite::Error> for QueryError {
 impl From<rusqlite::Error> for ReplayError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sql(value)
+    }
+}
+
+impl From<rusqlite::Error> for AnalysisWorkspaceError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Sql(value)
+    }
+}
+
+impl From<std::io::Error> for AnalysisWorkspaceError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
     }
 }

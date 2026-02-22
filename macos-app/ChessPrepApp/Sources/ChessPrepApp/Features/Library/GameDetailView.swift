@@ -9,6 +9,8 @@ struct GameDetailView: View {
     @State private var whiteAtBottom = true
     @State private var collapsedAnalysisNodeIDs: Set<UUID> = []
     @State private var legalMoveLookupBySource: [String: [String: String]] = [:]
+    @State private var legalMovesCacheByFen: [String: [String]] = [:]
+    @State private var availableEnginePaths: [String] = []
     @State private var editingAnnotationNodeID: UUID?
     @FocusState private var inlineAnnotationFocusID: UUID?
     @FocusState private var replayFocused: Bool
@@ -21,6 +23,7 @@ struct GameDetailView: View {
         "+/-", "-/+", "=", "inf",
         "-+", "=/inf",
     ]
+    private let quickAnnotationSymbols: [String] = ["!", "?", "!!", "??", "!?", "?!"]
 
     private struct AnalysisDisplayLine: Identifiable {
         let id: UUID
@@ -37,6 +40,16 @@ struct GameDetailView: View {
         let moveCore: String
         let nags: String
         let annotation: String
+    }
+
+    private struct PathGraphPlotPoint: Identifiable {
+        let nodeID: UUID
+        let ply: Int
+        let x: CGFloat
+        let y: CGFloat
+        let scoreLabel: String
+
+        var id: UUID { nodeID }
     }
 
     private struct MoveTokenFlowLayout: Layout {
@@ -147,6 +160,8 @@ struct GameDetailView: View {
         .focused($replayFocused)
         .onAppear {
             replayFocused = true
+            refreshEngineOptions()
+            state.scheduleAnalysisPathGraphEvaluation()
             if let locator {
                 state.selectGame(locator: locator)
                 state.reloadReplayForCurrentSelection()
@@ -161,16 +176,29 @@ struct GameDetailView: View {
             replayFocused = true
             collapsedAnalysisNodeIDs = []
             legalMoveLookupBySource = [:]
+            legalMovesCacheByFen = [:]
             editingAnnotationNodeID = nil
             inlineAnnotationFocusID = nil
+            state.scheduleAnalysisPathGraphEvaluation()
         }
         .onChange(of: state.currentAnalysisNodeID) { _, _ in
             expandSelectedAnalysisPath()
+            state.scheduleAnalysisPathGraphEvaluation()
+        }
+        .onChange(of: state.analysisNodesByID.count) { _, _ in
+            state.scheduleAnalysisPathGraphEvaluation()
         }
         .onChange(of: inlineAnnotationFocusID) { _, nextFocus in
             if nextFocus == nil {
                 editingAnnotationNodeID = nil
             }
+        }
+        .onChange(of: state.enginePath) { _, _ in
+            refreshEngineOptions()
+            state.scheduleAnalysisPathGraphEvaluation()
+        }
+        .onChange(of: state.engineDepth) { _, _ in
+            state.scheduleAnalysisPathGraphEvaluation()
         }
         .onMoveCommand(perform: handleMoveCommand)
     }
@@ -263,66 +291,28 @@ struct GameDetailView: View {
                     analysisMoveListView
                         .frame(minWidth: 380, maxWidth: .infinity, minHeight: boardPixelSize, maxHeight: boardPixelSize, alignment: .topLeading)
                 }
-
-                if state.maxPly > 0 {
-                    Slider(
-                        value: Binding(
-                            get: { Double(state.currentPly) },
-                            set: { state.setReplayPly(Int($0.rounded())) }
-                        ),
-                        in: 0...Double(state.maxPly),
-                        step: 1
-                    )
-                    .tint(Theme.accent)
+                .onAppear {
+                    state.scheduleAutoAnalyze(for: boardFen)
                 }
-
-                HStack(spacing: 8) {
-                    iconButton(symbol: "backward.end.fill", action: state.goToReplayStart)
-                        .disabled(state.currentPly == 0)
-                    iconButton(symbol: "chevron.left", action: state.stepBackward)
-                        .disabled(!state.canStepBackward)
-                    iconButton(
-                        symbol: state.isReplayAutoPlaying ? "pause.fill" : "play.fill",
-                        prominent: true,
-                        action: state.toggleReplayAutoPlay
-                    )
-                    .disabled(state.maxPly == 0)
-                    iconButton(symbol: "chevron.right", action: state.stepForward)
-                        .disabled(!state.canStepForward)
-                    iconButton(symbol: "forward.end.fill", action: state.goToReplayEnd)
-                        .disabled(state.currentPly == state.maxPly)
-
-                    Button("Copy FEN") {
-                        state.copyCurrentFenToPasteboard()
+                .onChange(of: boardFen) { _, nextFen in
+                    state.scheduleAutoAnalyze(for: nextFen)
+                }
+                .onChange(of: state.enginePath) { _, _ in
+                    state.scheduleAutoAnalyze(for: boardFen)
+                }
+                .onChange(of: state.engineDepth) { _, _ in
+                    state.scheduleAutoAnalyze(for: boardFen)
+                }
+                .onChange(of: state.engineTopLineCount) { _, _ in
+                    state.scheduleAutoAnalyze(for: boardFen)
+                }
+                .onChange(of: state.autoAnalyzeEngine) { _, enabled in
+                    if enabled {
+                        state.scheduleAutoAnalyze(for: boardFen)
                     }
-                    .buttonStyle(.bordered)
-
-                    Spacer()
-
-                    Text("Ply \(state.currentPly) / \(state.maxPly)")
-                        .font(Typography.dataMono)
-                        .foregroundStyle(Theme.textSecondary)
                 }
 
-                HStack(spacing: 8) {
-                    statusChip(title: "Turn", value: activeColor(from: boardFen))
-                    statusChip(title: "Move", value: fullMoveNumber(from: boardFen))
-                    statusChip(title: "Node", value: state.currentAnalysisNode?.san ?? "Start")
-                }
-
-                if let analysisError = state.analysisError {
-                    Text(analysisError)
-                        .font(Typography.body)
-                        .foregroundStyle(Theme.error)
-                }
-
-                if !isCurrentAnalysisOnReplayMainline {
-                    Text("Viewing analysis variation from replay ply \(state.currentPly).")
-                        .font(Typography.detailLabel)
-                        .foregroundStyle(Theme.textSecondary)
-                }
-
-                enginePanel(currentFen: boardFen)
+                replayControlAndEnginePanel(currentFen: boardFen)
             } else {
                 Text("No replay data available for this game yet.")
                     .font(Typography.body)
@@ -331,73 +321,386 @@ struct GameDetailView: View {
         }
     }
 
+    private func replayControlAndEnginePanel(currentFen: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if state.maxPly > 0 {
+                Slider(
+                    value: Binding(
+                        get: { Double(state.currentPly) },
+                        set: { state.setReplayPly(Int($0.rounded())) }
+                    ),
+                    in: 0...Double(state.maxPly),
+                    step: 1
+                )
+                .tint(Theme.accent)
+            }
+
+            HStack(spacing: 8) {
+                iconButton(symbol: "backward.end.fill", action: state.goToReplayStart)
+                    .disabled(state.currentPly == 0)
+                iconButton(symbol: "chevron.left", action: state.stepBackward)
+                    .disabled(!state.canStepBackward)
+                iconButton(
+                    symbol: state.isReplayAutoPlaying ? "pause.fill" : "play.fill",
+                    prominent: true,
+                    action: state.toggleReplayAutoPlay
+                )
+                .disabled(state.maxPly == 0)
+                iconButton(symbol: "chevron.right", action: state.stepForward)
+                    .disabled(!state.canStepForward)
+                iconButton(symbol: "forward.end.fill", action: state.goToReplayEnd)
+                    .disabled(state.currentPly == state.maxPly)
+
+                Button("Copy FEN") {
+                    state.copyCurrentFenToPasteboard()
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Text("Ply \(state.currentPly) / \(state.maxPly)")
+                    .font(Typography.dataMono)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            HStack(spacing: 8) {
+                statusChip(title: "Turn", value: activeColor(from: currentFen))
+                statusChip(title: "Move", value: fullMoveNumber(from: currentFen))
+                statusChip(title: "Node", value: state.currentAnalysisNode?.san ?? "Start")
+            }
+
+            if let analysisError = state.analysisError {
+                Text(analysisError)
+                    .font(Typography.body)
+                    .foregroundStyle(Theme.error)
+            }
+
+            if !isCurrentAnalysisOnReplayMainline {
+                Text("Viewing analysis variation from replay ply \(state.currentPly).")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            analysisWorkspacePanel()
+
+            Divider()
+                .padding(.top, 2)
+
+            enginePanel(currentFen: currentFen)
+        }
+        .padding(12)
+        .background(Theme.surfaceAlt.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Theme.border.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private func analysisWorkspacePanel() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Analysis Workspace")
+                .font(Typography.detailLabel)
+
+            HStack(spacing: 8) {
+                TextField("Workspace name", text: $state.analysisWorkspaceName)
+                    .textFieldStyle(.roundedBorder)
+
+                Button {
+                    Task {
+                        await state.saveCurrentAnalysisWorkspace()
+                    }
+                } label: {
+                    if state.isSavingAnalysisWorkspace {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Saving...")
+                        }
+                    } else {
+                        Text("Save")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(state.isSavingAnalysisWorkspace || state.analysisNodesByID.isEmpty)
+            }
+
+            HStack(spacing: 8) {
+                Picker("Saved Analysis", selection: $state.selectedAnalysisWorkspaceID) {
+                    Text("No saved analysis").tag(Optional<Int64>.none)
+                    ForEach(state.analysisWorkspaceSummaries) { workspace in
+                        Text(analysisWorkspaceLabel(workspace))
+                            .tag(Optional(workspace.id))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    Task {
+                        await state.refreshAnalysisWorkspaces()
+                    }
+                } label: {
+                    if state.isLoadingAnalysisWorkspaceList {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Refresh")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(state.isLoadingAnalysisWorkspaceList)
+
+                Button {
+                    Task {
+                        await state.loadSelectedAnalysisWorkspace()
+                    }
+                } label: {
+                    if state.isLoadingAnalysisWorkspace {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading...")
+                        }
+                    } else {
+                        Text("Load")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(state.selectedAnalysisWorkspaceID == nil || state.isLoadingAnalysisWorkspace)
+
+                Button {
+                    Task {
+                        await state.renameSelectedAnalysisWorkspace()
+                    }
+                } label: {
+                    if state.isRenamingAnalysisWorkspace {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Rename")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(
+                    state.selectedAnalysisWorkspaceID == nil
+                        || state.isRenamingAnalysisWorkspace
+                        || state.analysisWorkspaceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+
+                Button(role: .destructive) {
+                    Task {
+                        await state.deleteSelectedAnalysisWorkspace()
+                    }
+                } label: {
+                    if state.isDeletingAnalysisWorkspace {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Delete")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(state.selectedAnalysisWorkspaceID == nil || state.isDeletingAnalysisWorkspace)
+            }
+
+            HStack(spacing: 8) {
+                if let loadedName = state.loadedAnalysisWorkspaceName,
+                   !loadedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    statusChip(title: "Loaded", value: loadedName)
+                }
+                if let savedName = state.lastSavedAnalysisWorkspaceName,
+                   !savedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    statusChip(title: "Last Saved", value: savedName)
+                }
+                if state.analysisWorkspaceIsDirty {
+                    statusChip(title: "State", value: "Unsaved changes")
+                }
+            }
+
+            if let status = state.analysisWorkspaceStatus,
+               !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(status)
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            if let error = state.analysisWorkspaceError,
+               !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(error)
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.error)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func analysisWorkspaceLabel(_ workspace: AnalysisWorkspaceSummary) -> String {
+        let updated = Self.workspaceDateFormatter.string(from: workspace.updatedAt)
+        return "\(workspace.name) (\(updated))"
+    }
+
+    private static let workspaceDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
+
     private func enginePanel(currentFen: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Engine Analysis")
                 .font(Typography.detailLabel)
 
             HStack(spacing: 8) {
-                TextField("Engine binary path (e.g. /opt/homebrew/bin/stockfish)", text: $state.enginePath)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Typography.body)
+                Label("Engine", systemImage: "cpu")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
 
-                Button("Select Engine") {
-                    chooseEngineBinary()
+                Picker("Engine", selection: $state.enginePath) {
+                    if availableEnginePaths.isEmpty {
+                        Text("No engines detected").tag("")
+                    } else {
+                        ForEach(availableEnginePaths, id: \.self) { path in
+                            Text(engineOptionLabel(for: path)).tag(path)
+                        }
+                    }
                 }
-                .buttonStyle(.bordered)
-            }
-
-            HStack(spacing: 10) {
-                Stepper(value: $state.engineDepth, in: 1...60) {
-                    Text("Depth \(state.engineDepth)")
-                        .font(Typography.dataMono)
-                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .frame(width: 320, alignment: .leading)
+                .disabled(availableEnginePaths.isEmpty)
 
                 Button {
-                    Task {
-                        await state.analyzeCurrentPosition()
-                    }
+                    chooseEngineBinary()
                 } label: {
-                    if state.isAnalyzingEngine {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Analyzing...")
-                        }
-                    } else {
-                        Text("Analyze Current Position")
-                    }
+                    Label("Browse", systemImage: "folder")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-                .disabled(state.isAnalyzingEngine || currentFen.isEmpty)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
             }
+
+            Toggle("Auto Analyze Current Position", isOn: $state.autoAnalyzeEngine)
+                .toggleStyle(.switch)
+                .font(Typography.detailLabel)
 
             if let engineError = state.engineError {
                 Text(engineError)
                     .font(Typography.body)
                     .foregroundStyle(Theme.error)
             }
-
-            if let analysis = state.engineAnalysis {
-                HStack(spacing: 8) {
-                    statusChip(title: "Depth", value: "\(analysis.depth)")
-                    statusChip(title: "Score", value: analysis.scoreLabel)
-                    statusChip(title: "Best", value: analysis.bestMove ?? "-")
-                }
-
-                if !analysis.pv.isEmpty {
-                    Text("PV: \(analysis.pv.joined(separator: " "))")
-                        .font(Typography.dataMono)
-                        .foregroundStyle(Theme.textSecondary)
-                        .textSelection(.enabled)
-                }
-            }
         }
         .padding(.top, 6)
     }
 
+    private func refreshEngineOptions() {
+        let detected = detectedEnginePaths()
+        let current = state.enginePath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var merged: [String] = []
+        if !current.isEmpty {
+            merged.append(current)
+        }
+        merged.append(contentsOf: detected)
+
+        var seen = Set<String>()
+        var unique: [String] = []
+        for path in merged {
+            if seen.insert(path).inserted {
+                unique.append(path)
+            }
+        }
+
+        availableEnginePaths = unique
+
+        if current.isEmpty, let first = availableEnginePaths.first {
+            state.enginePath = first
+        }
+    }
+
+    private func detectedEnginePaths() -> [String] {
+        let commonPaths = [
+            "/opt/homebrew/bin/stockfish",
+            "/opt/homebrew/opt/stockfish/bin/stockfish",
+            "/usr/local/bin/stockfish",
+            "/usr/bin/stockfish",
+            "/Applications/Stockfish.app/Contents/MacOS/Stockfish",
+        ]
+
+        let engineNames = ["stockfish", "lc0"]
+        let pathEntries = ProcessInfo.processInfo.environment["PATH"]?
+            .split(separator: ":")
+            .map(String.init) ?? []
+
+        var candidates = commonPaths
+        for entry in pathEntries {
+            for engineName in engineNames {
+                candidates.append((entry as NSString).appendingPathComponent(engineName))
+            }
+        }
+
+        var seen = Set<String>()
+        var out: [String] = []
+        for candidate in candidates {
+            let expanded = (candidate as NSString).expandingTildeInPath
+            guard FileManager.default.isExecutableFile(atPath: expanded) else { continue }
+            if seen.insert(expanded).inserted {
+                out.append(expanded)
+            }
+        }
+        return out
+    }
+
+    private func engineOptionLabel(for path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        let fileName = url.lastPathComponent
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        guard !parent.isEmpty else { return fileName }
+        return "\(fileName)  (\(parent))"
+    }
+
+    private func chooseEngineBinary() {
+        #if canImport(AppKit)
+        let panel = NSOpenPanel()
+        panel.title = "Select UCI Engine Binary"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        if panel.runModal() == .OK, let url = panel.url {
+            state.enginePath = url.path
+            refreshEngineOptions()
+        }
+        #endif
+    }
+
     private var analysisMoveListView: some View {
+        GeometryReader { proxy in
+            let moveTreeHeight = max(180, proxy.size.height * 0.56)
+
+            VStack(alignment: .leading, spacing: 10) {
+                moveTreePanel
+                    .frame(height: moveTreeHeight)
+
+                Divider()
+
+                moveNotationEngineLinesPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .padding(12)
+            .background(Theme.surfaceAlt.opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Theme.border.opacity(0.25), lineWidth: 1)
+            )
+        }
+    }
+
+    private var moveTreePanel: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
@@ -418,6 +721,38 @@ struct GameDetailView: View {
                     .font(Typography.detailLabel)
                 }
 
+                HStack(spacing: 6) {
+                    Text("Quick NAG")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    ForEach(quickAnnotationSymbols, id: \.self) { symbol in
+                        Button(symbol) {
+                            guard let nodeID = selectedQuickAnnotationNodeID else { return }
+                            applyAnnotationSymbol(symbol, to: nodeID)
+                        }
+                        .buttonStyle(.plain)
+                        .font(Typography.dataMono)
+                        .frame(width: 36, height: 24)
+                        .background(
+                            selectedQuickAnnotationNodeID.flatMap { nodeID in
+                                isAnnotationSymbolSelected(symbol, on: nodeID) ? Theme.accent.opacity(0.22) : Theme.surface
+                            } ?? Theme.surface
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(
+                                    selectedQuickAnnotationNodeID.flatMap { nodeID in
+                                        isAnnotationSymbolSelected(symbol, on: nodeID) ? Theme.accent : Theme.border.opacity(0.3)
+                                    } ?? Theme.border.opacity(0.3),
+                                    lineWidth: 1
+                                )
+                        )
+                        .disabled(selectedQuickAnnotationNodeID == nil)
+                    }
+                }
+
                 Divider()
 
                 if analysisDisplayLines.isEmpty {
@@ -431,13 +766,292 @@ struct GameDetailView: View {
                 }
             }
         }
-        .padding(12)
-        .background(Theme.surfaceAlt.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Theme.border.opacity(0.25), lineWidth: 1)
-        )
+    }
+
+    private var moveNotationEngineLinesPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            pathEbbFlowPanel
+
+            Divider()
+
+            engineLinesPanel
+        }
+    }
+
+    private var pathEbbFlowPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Path Ebb/Flow")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+
+                Spacer()
+
+                if let status = pathGraphStatusLabel {
+                    Text(status)
+                        .font(Typography.dataMono)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            ZStack(alignment: .bottomLeading) {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Theme.surfaceAlt.opacity(0.35))
+
+                if state.analysisPathGraphPoints.isEmpty {
+                    Text(pathGraphEmptyMessage)
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .padding(.horizontal, 8)
+                } else {
+                    GeometryReader { proxy in
+                        let values = state.analysisPathGraphPoints.compactMap(\.plotValue)
+                        let range = pathGraphValueRange(for: values)
+                        let plotPoints = pathGraphPlotPoints(in: proxy.size)
+                        let zeroY = pathGraphY(
+                            value: 0,
+                            minValue: range.min,
+                            maxValue: range.max,
+                            height: proxy.size.height,
+                            padding: 8
+                        )
+
+                        ZStack(alignment: .topLeading) {
+                            Path { path in
+                                path.move(to: CGPoint(x: 8, y: zeroY))
+                                path.addLine(to: CGPoint(x: max(proxy.size.width - 8, 8), y: zeroY))
+                            }
+                            .stroke(Theme.border.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+
+                            Path { path in
+                                guard let first = plotPoints.first else { return }
+                                path.move(to: CGPoint(x: first.x, y: first.y))
+                                for point in plotPoints.dropFirst() {
+                                    path.addLine(to: CGPoint(x: point.x, y: point.y))
+                                }
+                            }
+                            .stroke(Theme.accent.opacity(0.75), lineWidth: 2)
+
+                            ForEach(plotPoints) { point in
+                                Button {
+                                    selectAnalysisNodeFromMoveList(point.nodeID)
+                                } label: {
+                                    Circle()
+                                        .fill(point.nodeID == state.currentAnalysisNodeID ? Theme.accent : Theme.textSecondary.opacity(0.75))
+                                        .frame(
+                                            width: point.nodeID == state.currentAnalysisNodeID ? 11 : 8,
+                                            height: point.nodeID == state.currentAnalysisNodeID ? 11 : 8
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .position(x: point.x, y: point.y)
+                                .help("Ply \(point.ply)  \(point.scoreLabel)")
+                            }
+                        }
+                    }
+                }
+
+                if state.isLoadingAnalysisPathGraph,
+                   let progress = state.analysisPathGraphProgressText {
+                    Text(progress)
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Theme.surface.opacity(0.92))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .padding(8)
+                }
+            }
+            .frame(height: 126)
+
+            if state.analysisPathGraphIsTruncated {
+                Text("Graph limited to first 120 plies.")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            if let graphError = state.analysisPathGraphError,
+               !graphError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(graphError)
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.error)
+            }
+        }
+    }
+
+    private var pathGraphStatusLabel: String? {
+        guard let currentNodeID = state.currentAnalysisNodeID else { return nil }
+        guard let point = state.analysisPathGraphPoints.first(where: { $0.nodeID == currentNodeID }) else { return nil }
+        return "Ply \(point.ply)  \(point.scoreLabel)"
+    }
+
+    private var pathGraphEmptyMessage: String {
+        if state.enginePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Select an engine to build the path graph."
+        }
+        if state.analysisNodesByID.isEmpty {
+            return "No analysis path available yet."
+        }
+        return "Graph will appear as evaluations are computed."
+    }
+
+    private func pathGraphPlotPoints(in size: CGSize) -> [PathGraphPlotPoint] {
+        guard !state.analysisPathGraphPoints.isEmpty else { return [] }
+
+        let values = state.analysisPathGraphPoints.compactMap(\.plotValue)
+        guard !values.isEmpty else { return [] }
+
+        let padding: CGFloat = 8
+        let range = pathGraphValueRange(for: values)
+        let totalPly = max(state.analysisPathGraphPoints.count - 1, 1)
+        let usableWidth = max(size.width - (padding * 2), 1)
+
+        return state.analysisPathGraphPoints.compactMap { point in
+            guard let plotValue = point.plotValue else { return nil }
+
+            let x = padding + (CGFloat(point.ply) / CGFloat(totalPly)) * usableWidth
+            let y = pathGraphY(
+                value: plotValue,
+                minValue: range.min,
+                maxValue: range.max,
+                height: size.height,
+                padding: padding
+            )
+
+            return PathGraphPlotPoint(
+                nodeID: point.nodeID,
+                ply: point.ply,
+                x: x,
+                y: y,
+                scoreLabel: point.scoreLabel
+            )
+        }
+    }
+
+    private func pathGraphValueRange(for values: [Double]) -> (min: Double, max: Double) {
+        let minValue = min(values.min() ?? -100, -50)
+        let maxValue = max(values.max() ?? 100, 50)
+        if abs(maxValue - minValue) < 1 {
+            return (minValue - 1, maxValue + 1)
+        }
+        return (minValue, maxValue)
+    }
+
+    private func pathGraphY(
+        value: Double,
+        minValue: Double,
+        maxValue: Double,
+        height: CGFloat,
+        padding: CGFloat
+    ) -> CGFloat {
+        let clampedHeight = max(height - (padding * 2), 1)
+        let range = max(maxValue - minValue, 1)
+        let normalized = (value - minValue) / range
+        return padding + (1 - CGFloat(normalized)) * clampedHeight
+    }
+
+    private var engineLinesPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Engine Lines")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+
+                Spacer()
+            }
+
+            HStack(spacing: 10) {
+                Stepper(value: $state.engineDepth, in: 1...60) {
+                    Text("Depth \(state.engineDepth)")
+                        .font(Typography.dataMono)
+                }
+
+                Picker("Lines", selection: $state.engineTopLineCount) {
+                    Text("1").tag(1)
+                    Text("2").tag(2)
+                    Text("3").tag(3)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 146)
+
+                Button {
+                    Task {
+                        await state.analyzeCurrentPosition()
+                    }
+                } label: {
+                    if state.isAnalyzingEngine {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(state.autoAnalyzeEngine ? "Auto Analyzing..." : "Analyzing...")
+                        }
+                    } else {
+                        Text("Analyze Now")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(
+                    state.isAnalyzingEngine
+                        || state.currentFen?.isEmpty != false
+                        || state.enginePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
+
+            if state.isAnalyzingEngine {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Updating engine lines...")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else if let engineError = state.engineError {
+                Text(engineError)
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.error)
+            } else if let analysis = state.engineAnalysis {
+                let topLines = Array(analysis.displayLines.prefix(state.engineTopLineCount))
+                if topLines.isEmpty {
+                    Text("No engine lines available yet.")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(topLines) { line in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("#\(line.multipvRank)")
+                                        .font(Typography.detailLabel)
+                                        .foregroundStyle(Theme.textSecondary)
+                                        .frame(width: 24, alignment: .leading)
+
+                                    Text(line.scoreLabel)
+                                        .font(Typography.dataMono)
+                                        .frame(width: 54, alignment: .leading)
+
+                                    Text(line.displayPv.joined(separator: " "))
+                                        .font(Typography.dataMono)
+                                        .foregroundStyle(Theme.textSecondary)
+                                        .lineLimit(2)
+                                        .textSelection(.enabled)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(line.multipvRank == 1 ? Theme.accent.opacity(0.14) : Theme.surfaceAlt.opacity(0.55))
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text("Run engine analysis to populate lines here.")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
     }
 
     private func analysisDisplayLineView(_ line: AnalysisDisplayLine) -> some View {
@@ -612,10 +1226,13 @@ struct GameDetailView: View {
     }
 
     private func lineTokens(for line: AnalysisDisplayLine) -> [LineToken] {
-        line.nodeIDs.compactMap { nodeID in
+        guard let firstNodeID = line.nodeIDs.first else { return [] }
+        let basePly = plyForNode(firstNodeID) ?? 1
+
+        return line.nodeIDs.enumerated().compactMap { index, nodeID in
             guard let node = state.analysisNodesByID[nodeID] else { return nil }
 
-            let ply = plyForNode(nodeID) ?? 1
+            let ply = basePly + index
             let moveCore = "\(movePrefixForPly(ply))\(node.san ?? node.uci ?? "...")"
             let nags = node.nags.joined(separator: " ")
             let annotation = node.comment.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -627,6 +1244,14 @@ struct GameDetailView: View {
                 annotation: annotation
             )
         }
+    }
+
+    private var selectedQuickAnnotationNodeID: UUID? {
+        guard let nodeID = state.currentAnalysisNodeID else { return nil }
+        guard let node = state.analysisNodesByID[nodeID] else { return nil }
+        guard nodeID != state.analysisRootNodeID else { return nil }
+        guard node.san != nil || node.uci != nil else { return nil }
+        return nodeID
     }
 
     @ViewBuilder
@@ -949,19 +1574,6 @@ struct GameDetailView: View {
         return state.analysisNodeIDByPly[state.currentPly] == currentID
     }
 
-    private func chooseEngineBinary() {
-        #if canImport(AppKit)
-        let panel = NSOpenPanel()
-        panel.title = "Select UCI Engine Binary"
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-
-        if panel.runModal() == .OK, let url = panel.url {
-            state.enginePath = url.path
-        }
-        #endif
-    }
-
     private func highlightedSquares() -> Set<String> {
         guard let squares = moveSquaresFromActiveNode() else { return [] }
         return [squares.from, squares.to]
@@ -985,10 +1597,18 @@ struct GameDetailView: View {
 
     private func refreshLegalMoveLookup(for fen: String) async {
         legalMoveLookupBySource = [:]
+        if let cachedMoves = legalMovesCacheByFen[fen] {
+            legalMoveLookupBySource = buildLegalMoveLookup(cachedMoves)
+            return
+        }
 
         do {
             let legalMoves = try await state.legalMoves(fen: fen)
             if Task.isCancelled { return }
+            if legalMovesCacheByFen.count > 400 {
+                legalMovesCacheByFen.removeAll(keepingCapacity: true)
+            }
+            legalMovesCacheByFen[fen] = legalMoves
             legalMoveLookupBySource = buildLegalMoveLookup(legalMoves)
         } catch {
             if Task.isCancelled { return }

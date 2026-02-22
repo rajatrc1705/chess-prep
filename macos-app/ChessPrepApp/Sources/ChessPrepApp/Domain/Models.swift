@@ -172,12 +172,84 @@ struct AnalysisNode: Identifiable, Equatable, Sendable {
     var children: [UUID]
 }
 
-struct EngineAnalysis: Equatable, Sendable {
+struct AnalysisWorkspaceNodeRecord: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let parentID: UUID?
+    let san: String?
+    let uci: String?
+    let fen: String
+    let comment: String
+    let nags: [String]
+    let sortIndex: Int
+}
+
+struct AnalysisWorkspaceSummary: Identifiable, Equatable, Sendable {
+    let id: Int64
+    let sourceDatabasePath: String
+    let gameID: Int64
+    let name: String
+    let rootNodeID: UUID
+    let currentNodeID: UUID?
+    let createdAt: Date
+    let updatedAt: Date
+}
+
+struct LoadedAnalysisWorkspace: Equatable, Sendable {
+    let workspace: AnalysisWorkspaceSummary
+    let nodes: [AnalysisWorkspaceNodeRecord]
+}
+
+struct AnalysisPathGraphPoint: Identifiable, Equatable, Sendable {
+    let nodeID: UUID
+    let ply: Int
+    var scoreCp: Int?
+    var scoreMate: Int?
+    var isEvaluated: Bool
+
+    var id: UUID { nodeID }
+
+    var scoreLabel: String {
+        if let mate = scoreMate {
+            return "M\(mate)"
+        }
+        if let cp = scoreCp {
+            let pawns = Double(cp) / 100.0
+            return String(format: "%+.2f", pawns)
+        }
+        return "--"
+    }
+
+    var plotValue: Double? {
+        if let mate = scoreMate {
+            return mate >= 0 ? 1300 : -1300
+        }
+        if let cp = scoreCp {
+            return Double(max(min(cp, 1200), -1200))
+        }
+        return nil
+    }
+}
+
+struct EngineLine: Identifiable, Equatable, Sendable {
+    let multipvRank: Int
     let depth: Int
     let scoreCp: Int?
     let scoreMate: Int?
-    let bestMove: String?
     let pv: [String]
+    let sanPv: [String]
+
+    var id: Int { multipvRank }
+
+    var displayPv: [String] {
+        if !sanPv.isEmpty {
+            return sanPv
+        }
+        return pv
+    }
+
+    var bestMoveDisplay: String? {
+        displayPv.first
+    }
 
     var scoreLabel: String {
         if let mate = scoreMate {
@@ -188,5 +260,42 @@ struct EngineAnalysis: Equatable, Sendable {
             return String(format: "%+.2f", pawns)
         }
         return "N/A"
+    }
+}
+
+struct EngineAnalysis: Equatable, Sendable {
+    let depth: Int
+    let scoreCp: Int?
+    let scoreMate: Int?
+    let bestMove: String?
+    let pv: [String]
+    let lines: [EngineLine]
+
+    var scoreLabel: String {
+        if let mate = scoreMate {
+            return "M\(mate)"
+        }
+        if let cp = scoreCp {
+            let pawns = Double(cp) / 100.0
+            return String(format: "%+.2f", pawns)
+        }
+        return "N/A"
+    }
+
+    var displayLines: [EngineLine] {
+        if !lines.isEmpty {
+            return lines
+        }
+
+        return [
+            EngineLine(
+                multipvRank: 1,
+                depth: depth,
+                scoreCp: scoreCp,
+                scoreMate: scoreMate,
+                pv: pv,
+                sanPv: []
+            ),
+        ]
     }
 }

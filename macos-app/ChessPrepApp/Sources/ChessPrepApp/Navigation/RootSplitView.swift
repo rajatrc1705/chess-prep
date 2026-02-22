@@ -1,7 +1,11 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct RootSplitView: View {
     @ObservedObject var state: AppState
+    @State private var sidebarDatabasePathInput = ""
     private let sidebarWidth: CGFloat = 290
     private let detailWidth: CGFloat = 380
 
@@ -47,6 +51,20 @@ struct RootSplitView: View {
     private var sidebar: some View {
         List {
             Section {
+                AppLogoView(
+                    size: 40,
+                    titleColor: Theme.textOnBrown,
+                    subtitleColor: Theme.textOnBrown.opacity(0.74),
+                    badgeDark: Theme.accent,
+                    badgeLight: Theme.textOnBrown.opacity(0.52),
+                    iconColor: Theme.sidebarBackground,
+                    subtitle: "Opening and game analysis"
+                )
+                .padding(.vertical, 4)
+                .listRowBackground(Theme.sidebarBackground)
+            }
+
+            Section {
                 ForEach(AppSection.allCases) { section in
                     HStack {
                         Label(section.title, systemImage: section.systemImage)
@@ -73,6 +91,38 @@ struct RootSplitView: View {
             }
 
             Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    sidebarTextField("Path to SQLite database", text: $sidebarDatabasePathInput)
+                        .listRowBackground(Theme.sidebarBackground)
+
+                    HStack(spacing: 8) {
+                        sidebarFilterButton(
+                            title: "Register",
+                            foreground: Theme.sidebarBackground,
+                            background: Theme.textOnBrown
+                        ) {
+                            registerSidebarDatabasePath()
+                        }
+                        .disabled(sidebarDatabasePathInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        sidebarFilterButton(
+                            title: "Browse",
+                            foreground: Theme.textOnBrown,
+                            background: Theme.accent.opacity(0.55),
+                            border: Theme.textOnBrown.opacity(0.25)
+                        ) {
+                            selectDatabasePathFromSidebar()
+                        }
+                    }
+
+                    if let workspaceError = state.workspaceError {
+                        Text(workspaceError)
+                            .font(Typography.detailLabel)
+                            .foregroundStyle(Theme.error)
+                    }
+                }
+                .listRowBackground(Theme.sidebarBackground)
+
                 if state.workspaceDatabases.isEmpty {
                     Text("No databases registered")
                         .foregroundStyle(Theme.textOnBrown.opacity(0.8))
@@ -214,6 +264,29 @@ struct RootSplitView: View {
         .environment(\.colorScheme, .dark)
         .scrollContentBackground(.hidden)
         .background(Theme.sidebarBackground)
+    }
+
+    private func registerSidebarDatabasePath() {
+        let trimmed = sidebarDatabasePathInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        state.registerDatabase(path: trimmed)
+        sidebarDatabasePathInput = ""
+    }
+
+    private func selectDatabasePathFromSidebar() {
+        #if canImport(AppKit)
+        let panel = NSOpenPanel()
+        panel.title = "Select SQLite Database"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = ["sqlite", "sqlite3", "db"]
+
+        if panel.runModal() == .OK, let url = panel.url {
+            state.registerDatabase(path: url.path(percentEncoded: false))
+            sidebarDatabasePathInput = ""
+        }
+        #endif
     }
 
     private func sidebarTextField(_ title: String, text: Binding<String>) -> some View {

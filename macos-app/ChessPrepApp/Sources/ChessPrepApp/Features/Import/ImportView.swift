@@ -3,7 +3,6 @@ import SwiftUI
 
 struct ImportView: View {
     @ObservedObject var state: AppState
-    @State private var databasePathInput = ""
 
     var body: some View {
         ScrollView {
@@ -20,7 +19,7 @@ struct ImportView: View {
                     Text("Import Games")
                         .font(Typography.sectionTitle)
 
-                    Text("Choose target database, select PGN files, then run import.")
+                    Text("Choose a target database, select PGN files, then run import. Add databases from the sidebar.")
                         .font(Typography.body)
                         .foregroundStyle(Theme.textSecondary)
 
@@ -31,7 +30,7 @@ struct ImportView: View {
 
                         HStack(spacing: 10) {
                             if state.workspaceDatabases.isEmpty {
-                                Text("Register a database first")
+                                Text("Add a database from the sidebar first")
                                     .font(Typography.body)
                                     .foregroundStyle(Theme.error)
                             } else {
@@ -114,34 +113,6 @@ struct ImportView: View {
                     }
                 }
                 .panelCard()
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Database Registry")
-                        .font(Typography.sectionTitle)
-
-                    TextField("Path to SQLite database", text: $databasePathInput)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack(spacing: 10) {
-                        Button("Register Path") {
-                            state.registerDatabase(path: databasePathInput)
-                            databasePathInput = ""
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button("Select Database File") {
-                            selectDatabasePath()
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    if let workspaceError = state.workspaceError {
-                        Text(workspaceError)
-                            .font(Typography.body)
-                            .foregroundStyle(Theme.error)
-                    }
-                }
-                .panelCard()
             }
             .padding(24)
         }
@@ -176,19 +147,6 @@ struct ImportView: View {
             } else {
                 state.pgnPath = paths.joined(separator: "; ")
             }
-        }
-    }
-
-    private func selectDatabasePath() {
-        let panel = NSOpenPanel()
-        panel.title = "Select SQLite Database"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedFileTypes = ["sqlite", "sqlite3", "db"]
-
-        if panel.runModal() == .OK, let url = panel.url {
-            state.registerDatabase(path: url.path(percentEncoded: false))
         }
     }
 }

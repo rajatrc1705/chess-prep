@@ -9,7 +9,13 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "ChessPrepApp"
+            name: "ChessPrepApp",
+            exclude: [
+                "Resources/IconBuild",
+            ],
+            resources: [
+                .copy("Resources/AppIcon.icns"),
+            ]
         ),
         .testTarget(
             name: "ChessPrepAppTests",

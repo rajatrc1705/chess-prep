@@ -5,6 +5,19 @@ import XCTest
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    private func waitUntil(
+        timeoutSeconds: TimeInterval = 1.0,
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     private func makeState(
         gameRepository: any GameRepository = MockGameRepository(seedGames: MockGameRepository.previewGames),
         importRepository: any ImportRepository = MockImportRepository(simulatedDelayNanoseconds: 0),
@@ -244,6 +257,44 @@ final class AppStateTests: XCTestCase {
 
         state.stepBackward()
         XCTAssertEqual(state.currentAnalysisNodeID, state.analysisNodeIDByPly[0])
+    }
+
+    func testScheduleAnalysisPathGraphEvaluatesCurrentPath() async {
+        let state = makeState()
+        state.replayFens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        ]
+        state.replaySans = ["e4", "e5"]
+        state.replayUcis = ["e2e4", "e7e5"]
+        state.enginePath = "/opt/homebrew/bin/stockfish"
+        state.rebuildAnalysisTreeFromReplay()
+
+        state.scheduleAnalysisPathGraphEvaluation()
+        await waitUntil { !state.isLoadingAnalysisPathGraph }
+
+        XCTAssertFalse(state.analysisPathGraphPoints.isEmpty)
+        XCTAssertEqual(state.analysisPathGraphPoints.count, 3)
+        XCTAssertTrue(state.analysisPathGraphPoints.allSatisfy(\.isEvaluated))
+        XCTAssertNil(state.analysisPathGraphError)
+        XCTAssertNil(state.analysisPathGraphProgressText)
+    }
+
+    func testScheduleAnalysisPathGraphCapsAt120Plies() async {
+        let state = makeState()
+        let totalPlies = 130
+        state.replayFens = (0...totalPlies).map { "fen-\($0)" }
+        state.replaySans = (1...totalPlies).map { "move\($0)" }
+        state.replayUcis = (1...totalPlies).map { _ in "e2e4" }
+        state.enginePath = "/opt/homebrew/bin/stockfish"
+        state.rebuildAnalysisTreeFromReplay()
+
+        state.scheduleAnalysisPathGraphEvaluation()
+        await waitUntil { !state.isLoadingAnalysisPathGraph }
+
+        XCTAssertEqual(state.analysisPathGraphPoints.count, 120)
+        XCTAssertTrue(state.analysisPathGraphIsTruncated)
     }
 }
 #endif

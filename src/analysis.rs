@@ -7,7 +7,6 @@ use crate::types::{AnalysisError, AppliedMove};
 
 // fen is the current position, uci is the candidate move
 pub fn apply_uci_to_fen(fen: &str, uci: &str) -> Result<AppliedMove, AnalysisError> {
-
     // parses fen format correctly
     let parsed_fen = Fen::from_str(fen).map_err(|_| AnalysisError::InvalidFen(fen.to_owned()))?;
     let mut position: Chess = parsed_fen

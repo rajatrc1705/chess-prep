@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::str::FromStr;
 
-use crate::types::{EngineAnalysis, EngineError};
+use crate::types::{EngineAnalysis, EngineError, EngineLine};
+use shakmaty::uci::UciMove;
+use shakmaty::{CastlingMode, Chess, Position, fen::Fen, san::San};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedInfoLine {
@@ -12,17 +16,20 @@ struct ParsedInfoLine {
     multipv: u32,
 }
 
-fn send_uci_command(
-    stdin: &mut std::process::ChildStdin,
-    command: &str,
-) -> Result<(), EngineError> {
+pub struct EngineSession {
+    child: Child,
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
+}
+
+fn send_uci_command(stdin: &mut ChildStdin, command: &str) -> Result<(), EngineError> {
     writeln!(stdin, "{command}")?;
     stdin.flush()?;
     Ok(())
 }
 
 fn wait_for_uci_token(
-    reader: &mut BufReader<std::process::ChildStdout>,
+    reader: &mut BufReader<ChildStdout>,
     token: &str,
     max_lines: usize,
 ) -> Result<(), EngineError> {
@@ -114,61 +121,69 @@ fn parse_info_line(line: &str) -> Option<ParsedInfoLine> {
     }
 }
 
-fn better_info(candidate: &ParsedInfoLine, best: &Option<ParsedInfoLine>) -> bool {
-    if candidate.multipv != 1 {
-        return false;
-    }
-
-    match best {
-        None => true,
-        Some(current) => {
-            let candidate_depth = candidate.depth.unwrap_or(0);
-            let current_depth = current.depth.unwrap_or(0);
-            candidate_depth > current_depth
-                || (candidate_depth == current_depth
-                    && !candidate.pv.is_empty()
-                    && current.pv.is_empty())
-        }
-    }
+fn better_info(candidate: &ParsedInfoLine, current: &ParsedInfoLine) -> bool {
+    let candidate_depth = candidate.depth.unwrap_or(0);
+    let current_depth = current.depth.unwrap_or(0);
+    candidate_depth > current_depth
+        || (candidate_depth == current_depth && !candidate.pv.is_empty() && current.pv.is_empty())
 }
 
-pub fn analyze_position(
-    engine_path: &str,
-    fen: &str,
-    depth: u32,
-) -> Result<EngineAnalysis, EngineError> {
-    let depth = if depth == 0 { 18 } else { depth };
+fn normalized_depth(depth: u32) -> u32 {
+    if depth == 0 { 18 } else { depth }
+}
 
-    let mut child = Command::new(engine_path)
+fn normalized_multipv(multipv: u32) -> u32 {
+    multipv.clamp(1, 10)
+}
+
+fn pv_uci_to_san(fen: &str, pv: &[String]) -> Vec<String> {
+    let parsed_fen = match Fen::from_str(fen) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut position: Chess = match parsed_fen.into_position(CastlingMode::Standard) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut san_tokens: Vec<String> = Vec::new();
+
+    for uci in pv {
+        let parsed_uci = match UciMove::from_ascii(uci.as_bytes()) {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+
+        let mv = match parsed_uci.to_move(&position) {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+
+        let san = San::from_move(&position, mv).to_string();
+        san_tokens.push(san);
+        position.play_unchecked(mv);
+    }
+
+    san_tokens
+}
+
+fn spawn_engine(engine_path: &str) -> Result<Child, EngineError> {
+    Command::new(engine_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| {
-            EngineError::Spawn(format!("failed to start engine '{engine_path}': {err}"))
-        })?;
+        .map_err(|err| EngineError::Spawn(format!("failed to start engine '{engine_path}': {err}")))
+}
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| EngineError::Protocol("engine stdin is unavailable".to_string()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| EngineError::Protocol("engine stdout is unavailable".to_string()))?;
-    let mut reader = BufReader::new(stdout);
-
-    send_uci_command(&mut stdin, "uci")?;
-    wait_for_uci_token(&mut reader, "uciok", 20_000)?;
-
-    send_uci_command(&mut stdin, "isready")?;
-    wait_for_uci_token(&mut reader, "readyok", 20_000)?;
-
-    send_uci_command(&mut stdin, "ucinewgame")?;
-    send_uci_command(&mut stdin, &format!("position fen {fen}"))?;
-    send_uci_command(&mut stdin, &format!("go depth {depth}"))?;
-
-    let mut best: Option<ParsedInfoLine> = None;
+fn collect_analysis_result(
+    reader: &mut BufReader<ChildStdout>,
+    fen: &str,
+    requested_depth: u32,
+    requested_multipv: u32,
+) -> Result<EngineAnalysis, EngineError> {
+    let mut best_by_rank: BTreeMap<u32, ParsedInfoLine> = BTreeMap::new();
     let mut bestmove: Option<String> = None;
     let mut line = String::new();
 
@@ -183,8 +198,16 @@ pub fn analyze_position(
 
         let trimmed = line.trim();
         if let Some(info) = parse_info_line(trimmed) {
-            if better_info(&info, &best) {
-                best = Some(info);
+            if info.multipv == 0 || info.multipv > requested_multipv {
+                continue;
+            }
+
+            let should_update = match best_by_rank.get(&info.multipv) {
+                Some(current) => better_info(&info, current),
+                None => true,
+            };
+            if should_update {
+                best_by_rank.insert(info.multipv, info);
             }
             continue;
         }
@@ -200,20 +223,132 @@ pub fn analyze_position(
         }
     }
 
-    let _ = send_uci_command(&mut stdin, "quit");
-    let _ = child.wait();
+    if best_by_rank.is_empty() {
+        return Err(EngineError::Protocol(
+            "engine returned no analysis info for this position".to_string(),
+        ));
+    }
 
-    let best = best.ok_or_else(|| {
-        EngineError::Protocol("engine returned no analysis info for this position".to_string())
-    })?;
+    let mut lines: Vec<EngineLine> = best_by_rank
+        .into_iter()
+        .map(|(rank, info)| {
+            let san_pv = pv_uci_to_san(fen, &info.pv);
+            EngineLine {
+                multipv_rank: rank,
+                depth: info.depth.unwrap_or(requested_depth),
+                score_cp: info.score_cp,
+                score_mate: info.score_mate,
+                pv: info.pv,
+                san_pv,
+            }
+        })
+        .collect();
+    lines.sort_by_key(|line| line.multipv_rank);
+
+    let primary = lines
+        .iter()
+        .find(|line| line.multipv_rank == 1)
+        .or_else(|| lines.first())
+        .ok_or_else(|| {
+            EngineError::Protocol("engine returned no analysis info for this position".to_string())
+        })?;
+
+    let bestmove = primary
+        .san_pv
+        .first()
+        .cloned()
+        .or(bestmove)
+        .or_else(|| primary.pv.first().cloned());
 
     Ok(EngineAnalysis {
-        depth: best.depth.unwrap_or(depth),
-        score_cp: best.score_cp,
-        score_mate: best.score_mate,
+        depth: primary.depth,
+        score_cp: primary.score_cp,
+        score_mate: primary.score_mate,
         bestmove,
-        pv: best.pv,
+        pv: primary.pv.clone(),
+        lines,
     })
+}
+
+fn analyze_with_engine_io(
+    stdin: &mut ChildStdin,
+    reader: &mut BufReader<ChildStdout>,
+    fen: &str,
+    depth: u32,
+    multipv: u32,
+) -> Result<EngineAnalysis, EngineError> {
+    let depth = normalized_depth(depth);
+    let multipv = normalized_multipv(multipv);
+    send_uci_command(stdin, &format!("setoption name MultiPV value {multipv}"))?;
+    send_uci_command(stdin, "isready")?;
+    wait_for_uci_token(reader, "readyok", 20_000)?;
+    send_uci_command(stdin, &format!("position fen {fen}"))?;
+    send_uci_command(stdin, &format!("go depth {depth}"))?;
+    collect_analysis_result(reader, fen, depth, multipv)
+}
+
+impl EngineSession {
+    pub fn start(engine_path: &str) -> Result<Self, EngineError> {
+        let mut child = spawn_engine(engine_path)?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| EngineError::Protocol("engine stdin is unavailable".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| EngineError::Protocol("engine stdout is unavailable".to_string()))?;
+        let mut reader = BufReader::new(stdout);
+
+        send_uci_command(&mut stdin, "uci")?;
+        wait_for_uci_token(&mut reader, "uciok", 20_000)?;
+        send_uci_command(&mut stdin, "isready")?;
+        wait_for_uci_token(&mut reader, "readyok", 20_000)?;
+
+        Ok(Self {
+            child,
+            stdin,
+            reader,
+        })
+    }
+
+    pub fn analyze(&mut self, fen: &str, depth: u32) -> Result<EngineAnalysis, EngineError> {
+        analyze_with_engine_io(&mut self.stdin, &mut self.reader, fen, depth, 1)
+    }
+
+    pub fn analyze_multipv(
+        &mut self,
+        fen: &str,
+        depth: u32,
+        multipv: u32,
+    ) -> Result<EngineAnalysis, EngineError> {
+        analyze_with_engine_io(&mut self.stdin, &mut self.reader, fen, depth, multipv)
+    }
+}
+
+impl Drop for EngineSession {
+    fn drop(&mut self) {
+        let _ = send_uci_command(&mut self.stdin, "quit");
+        let _ = self.child.wait();
+    }
+}
+
+pub fn analyze_position(
+    engine_path: &str,
+    fen: &str,
+    depth: u32,
+) -> Result<EngineAnalysis, EngineError> {
+    analyze_position_multipv(engine_path, fen, depth, 1)
+}
+
+pub fn analyze_position_multipv(
+    engine_path: &str,
+    fen: &str,
+    depth: u32,
+    multipv: u32,
+) -> Result<EngineAnalysis, EngineError> {
+    let mut session = EngineSession::start(engine_path)?;
+    session.analyze_multipv(fen, depth, multipv)
 }
 
 #[cfg(test)]

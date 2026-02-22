@@ -37,8 +37,30 @@ final class AppState: ObservableObject {
     @Published var currentAnalysisNodeID: UUID?
     @Published var analysisMoveInput = ""
     @Published var analysisError: String?
+    @Published var analysisWorkspaceName = ""
+    @Published var analysisWorkspaceSummaries: [AnalysisWorkspaceSummary] = []
+    @Published var selectedAnalysisWorkspaceID: Int64?
+    @Published var isSavingAnalysisWorkspace = false
+    @Published var isRenamingAnalysisWorkspace = false
+    @Published var isDeletingAnalysisWorkspace = false
+    @Published var isLoadingAnalysisWorkspaceList = false
+    @Published var isLoadingAnalysisWorkspace = false
+    @Published var analysisWorkspaceError: String?
+    @Published var analysisWorkspaceStatus: String?
+    @Published var loadedAnalysisWorkspaceID: Int64?
+    @Published var loadedAnalysisWorkspaceName: String?
+    @Published var lastSavedAnalysisWorkspaceID: Int64?
+    @Published var lastSavedAnalysisWorkspaceName: String?
+    @Published var analysisWorkspaceIsDirty = false
+    @Published var analysisPathGraphPoints: [AnalysisPathGraphPoint] = []
+    @Published var isLoadingAnalysisPathGraph = false
+    @Published var analysisPathGraphProgressText: String?
+    @Published var analysisPathGraphError: String?
+    @Published var analysisPathGraphIsTruncated = false
     @Published var enginePath = ""
     @Published var engineDepth = 18
+    @Published var engineTopLineCount = 1
+    @Published var autoAnalyzeEngine = true
     @Published var isAnalyzingEngine = false
     @Published var engineAnalysis: EngineAnalysis?
     @Published var engineError: String?
@@ -50,6 +72,51 @@ final class AppState: ObservableObject {
     private let analysisRepository: any AnalysisRepository
     private let workspaceStore: WorkspaceStore
     private var replayAutoPlayTask: Task<Void, Never>?
+    private var autoAnalyzeTask: Task<Void, Never>?
+    private var analysisPathGraphTask: Task<Void, Never>?
+    private var pendingAutoAnalyzeRequest: EngineRequestSignature?
+    private var lastEngineRequest: EngineRequestSignature?
+    private var analysisPathGraphCache: [PathGraphCacheKey: PathGraphCachedScore] = [:]
+    private var lastAnalysisPathGraphSignature: PathGraphRequestSignature?
+    private let analysisPathGraphMaxPlies = 120
+
+    private struct EngineRequestSignature: Equatable {
+        let fen: String
+        let enginePath: String
+        let depth: Int
+        let multipv: Int
+    }
+
+    private struct PathGraphCachedScore: Equatable {
+        let scoreCp: Int?
+        let scoreMate: Int?
+    }
+
+    private struct PathGraphCacheKey: Hashable {
+        let enginePath: String
+        let depth: Int
+        let fen: String
+    }
+
+    private struct PathGraphRequestSignature: Equatable {
+        let nodeIDs: [UUID]
+        let enginePath: String
+        let depth: Int
+    }
+
+    private struct PathGraphNodeInput {
+        let nodeID: UUID
+        let ply: Int
+        let fen: String
+    }
+
+    private struct PathGraphRequest {
+        let signature: PathGraphRequestSignature
+        let nodeInputs: [PathGraphNodeInput]
+        let enginePath: String
+        let depth: Int
+        let isTruncated: Bool
+    }
 
     init(
         gameRepository: any GameRepository = RustGameRepository(),
@@ -357,28 +424,193 @@ final class AppState: ObservableObject {
     }
 
     func analyzeCurrentPosition() async {
-        let fenToAnalyze = currentAnalysisFen ?? currentFen
-        guard let fen = fenToAnalyze else {
+        guard let fenToAnalyze = currentAnalysisFen ?? currentFen else {
+            engineError = "No position selected."
+            engineAnalysis = nil
+            return
+        }
+        let normalizedEnginePath = enginePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedEnginePath.isEmpty else {
+            engineError = "Select an engine first."
+            engineAnalysis = nil
+            return
+        }
+
+        guard let request = engineRequestSignature(for: fenToAnalyze) else {
             engineError = "No position selected."
             engineAnalysis = nil
             return
         }
 
+        await analyzeEngine(request: request, force: true)
+    }
+
+    func scheduleAutoAnalyze(for fen: String?) {
+        autoAnalyzeTask?.cancel()
+        autoAnalyzeTask = nil
+
+        guard autoAnalyzeEngine else { return }
+        guard let request = engineRequestSignature(for: fen) else { return }
+
+        autoAnalyzeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await self.analyzeEngine(request: request, force: false)
+        }
+    }
+
+    private func engineRequestSignature(for fen: String?) -> EngineRequestSignature? {
+        guard let fen else { return nil }
+        let normalizedFen = fen.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedFen.isEmpty else { return nil }
+
+        let normalizedEnginePath = enginePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedEnginePath.isEmpty else { return nil }
+
+        return EngineRequestSignature(
+            fen: normalizedFen,
+            enginePath: normalizedEnginePath,
+            depth: max(engineDepth, 1),
+            multipv: max(1, min(engineTopLineCount, 3))
+        )
+    }
+
+    private func analyzeEngine(request: EngineRequestSignature, force: Bool) async {
+        if !force,
+           request == lastEngineRequest,
+           engineAnalysis != nil {
+            return
+        }
+
+        if isAnalyzingEngine {
+            if !force {
+                pendingAutoAnalyzeRequest = request
+            }
+            return
+        }
+
         isAnalyzingEngine = true
         engineError = nil
-        defer { isAnalyzingEngine = false }
+        defer {
+            isAnalyzingEngine = false
+
+            if let pending = pendingAutoAnalyzeRequest {
+                pendingAutoAnalyzeRequest = nil
+                if pending != lastEngineRequest {
+                    Task { [weak self] in
+                        await self?.analyzeEngine(request: pending, force: false)
+                    }
+                }
+            }
+        }
 
         do {
             let analysis = try await engineRepository.analyzePosition(
-                enginePath: enginePath,
-                fen: fen,
-                depth: engineDepth
+                enginePath: request.enginePath,
+                fen: request.fen,
+                depth: request.depth,
+                multipv: request.multipv
             )
             engineAnalysis = analysis
+            lastEngineRequest = request
         } catch {
             engineAnalysis = nil
             engineError = error.localizedDescription
         }
+    }
+
+    func scheduleAnalysisPathGraphEvaluation() {
+        analysisPathGraphTask?.cancel()
+        analysisPathGraphTask = nil
+
+        guard let request = makeAnalysisPathGraphRequest() else {
+            clearAnalysisPathGraphState(clearCache: false)
+            return
+        }
+
+        let alreadyResolved = request.signature == lastAnalysisPathGraphSignature
+            && analysisPathGraphError == nil
+            && analysisPathGraphPoints.count == request.nodeInputs.count
+            && analysisPathGraphPoints.allSatisfy(\.isEvaluated)
+
+        if alreadyResolved {
+            analysisPathGraphIsTruncated = request.isTruncated
+            return
+        }
+
+        analysisPathGraphPoints = request.nodeInputs.map { input in
+            AnalysisPathGraphPoint(
+                nodeID: input.nodeID,
+                ply: input.ply,
+                scoreCp: nil,
+                scoreMate: nil,
+                isEvaluated: false
+            )
+        }
+        analysisPathGraphError = nil
+        analysisPathGraphProgressText = "Evaluating 0/\(request.nodeInputs.count)"
+        analysisPathGraphIsTruncated = request.isTruncated
+        isLoadingAnalysisPathGraph = true
+        lastAnalysisPathGraphSignature = request.signature
+
+        analysisPathGraphTask = Task { [weak self] in
+            await self?.runAnalysisPathGraphEvaluation(request)
+        }
+    }
+
+    private func runAnalysisPathGraphEvaluation(_ request: PathGraphRequest) async {
+        let total = request.nodeInputs.count
+        var completed = 0
+
+        for input in request.nodeInputs {
+            guard !Task.isCancelled else { return }
+
+            let cacheKey = PathGraphCacheKey(
+                enginePath: request.enginePath,
+                depth: request.depth,
+                fen: input.fen
+            )
+
+            let score: PathGraphCachedScore
+            if let cached = analysisPathGraphCache[cacheKey] {
+                score = cached
+            } else {
+                do {
+                    let analysis = try await engineRepository.analyzePosition(
+                        enginePath: request.enginePath,
+                        fen: input.fen,
+                        depth: request.depth,
+                        multipv: 1
+                    )
+                    score = PathGraphCachedScore(
+                        scoreCp: analysis.scoreCp,
+                        scoreMate: analysis.scoreMate
+                    )
+                    analysisPathGraphCache[cacheKey] = score
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    analysisPathGraphError = error.localizedDescription
+                    analysisPathGraphProgressText = nil
+                    isLoadingAnalysisPathGraph = false
+                    return
+                }
+            }
+
+            if let index = analysisPathGraphPoints.firstIndex(where: { $0.nodeID == input.nodeID }) {
+                analysisPathGraphPoints[index].scoreCp = score.scoreCp
+                analysisPathGraphPoints[index].scoreMate = score.scoreMate
+                analysisPathGraphPoints[index].isEvaluated = true
+            }
+
+            completed += 1
+            if completed < total {
+                analysisPathGraphProgressText = "Evaluating \(completed)/\(total)"
+            } else {
+                analysisPathGraphProgressText = nil
+            }
+        }
+
+        isLoadingAnalysisPathGraph = false
     }
 
     func rebuildAnalysisTreeFromReplay() {
@@ -488,6 +720,7 @@ final class AppState: ObservableObject {
             appendAnalysisChild(parentID: currentNodeID, childID: childID)
             currentAnalysisNodeID = childID
             analysisError = nil
+            markAnalysisWorkspaceDirty()
             clearEngineOutput()
         } catch {
             analysisError = error.localizedDescription
@@ -527,6 +760,7 @@ final class AppState: ObservableObject {
         }
 
         analysisError = nil
+        markAnalysisWorkspaceDirty()
         clearEngineOutput()
     }
 
@@ -541,8 +775,12 @@ final class AppState: ObservableObject {
 
     func updateAnalysisComment(id: UUID, comment: String) {
         guard var node = analysisNodesByID[id] else { return }
+        if node.comment == comment {
+            return
+        }
         node.comment = comment
         analysisNodesByID[id] = node
+        markAnalysisWorkspaceDirty()
     }
 
     func toggleCurrentAnalysisNag(_ nag: String) {
@@ -558,6 +796,7 @@ final class AppState: ObservableObject {
             node.nags.append(nag)
         }
         analysisNodesByID[id] = node
+        markAnalysisWorkspaceDirty()
     }
 
     func applyAnalysisAnnotationSymbol(id: UUID, symbol: String) {
@@ -578,6 +817,205 @@ final class AppState: ObservableObject {
         }
 
         analysisNodesByID[id] = node
+        markAnalysisWorkspaceDirty()
+    }
+
+    func refreshAnalysisWorkspaces() async {
+        guard let game = selectedGame else {
+            clearAnalysisWorkspaceState()
+            return
+        }
+
+        isLoadingAnalysisWorkspaceList = true
+        analysisWorkspaceError = nil
+        defer { isLoadingAnalysisWorkspaceList = false }
+
+        do {
+            let summaries = try await analysisRepository.listWorkspaces(
+                sourceDatabasePath: game.sourceDatabasePath,
+                gameID: game.databaseID
+            )
+            analysisWorkspaceSummaries = summaries
+
+            if let selected = selectedAnalysisWorkspaceID,
+               summaries.contains(where: { $0.id == selected }) {
+                // Keep current selection.
+            } else {
+                selectedAnalysisWorkspaceID = summaries.first?.id
+            }
+
+            if let loadedID = loadedAnalysisWorkspaceID,
+               let loadedSummary = summaries.first(where: { $0.id == loadedID }) {
+                loadedAnalysisWorkspaceName = loadedSummary.name
+            } else if loadedAnalysisWorkspaceID != nil {
+                loadedAnalysisWorkspaceID = nil
+                loadedAnalysisWorkspaceName = nil
+                analysisWorkspaceIsDirty = false
+            }
+
+            if let lastSavedID = lastSavedAnalysisWorkspaceID,
+               let savedSummary = summaries.first(where: { $0.id == lastSavedID }) {
+                lastSavedAnalysisWorkspaceName = savedSummary.name
+            } else if lastSavedAnalysisWorkspaceID != nil {
+                lastSavedAnalysisWorkspaceID = nil
+                lastSavedAnalysisWorkspaceName = nil
+            }
+        } catch {
+            analysisWorkspaceSummaries = []
+            selectedAnalysisWorkspaceID = nil
+            analysisWorkspaceError = error.localizedDescription
+        }
+    }
+
+    func saveCurrentAnalysisWorkspace() async {
+        guard let game = selectedGame else {
+            analysisWorkspaceError = "Select a game first."
+            return
+        }
+        guard let rootNodeID = analysisRootNodeID else {
+            analysisWorkspaceError = "No analysis tree to save."
+            return
+        }
+
+        let nodes = buildAnalysisWorkspaceNodeRecords(rootNodeID: rootNodeID)
+        guard !nodes.isEmpty else {
+            analysisWorkspaceError = "No analysis nodes available to save."
+            return
+        }
+
+        let trimmedName = analysisWorkspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspaceName = trimmedName.isEmpty ? defaultAnalysisWorkspaceName() : trimmedName
+
+        isSavingAnalysisWorkspace = true
+        analysisWorkspaceError = nil
+        analysisWorkspaceStatus = nil
+        defer { isSavingAnalysisWorkspace = false }
+
+        do {
+            let savedWorkspaceID = try await analysisRepository.saveWorkspace(
+                sourceDatabasePath: game.sourceDatabasePath,
+                gameID: game.databaseID,
+                name: workspaceName,
+                rootNodeID: rootNodeID,
+                currentNodeID: currentAnalysisNodeID,
+                nodes: nodes
+            )
+            analysisWorkspaceName = workspaceName
+            await refreshAnalysisWorkspaces()
+            selectedAnalysisWorkspaceID = savedWorkspaceID
+            loadedAnalysisWorkspaceID = savedWorkspaceID
+            loadedAnalysisWorkspaceName = workspaceName
+            lastSavedAnalysisWorkspaceID = savedWorkspaceID
+            lastSavedAnalysisWorkspaceName = workspaceName
+            analysisWorkspaceIsDirty = false
+            analysisWorkspaceStatus = "Saved \"\(workspaceName)\"."
+        } catch {
+            analysisWorkspaceError = error.localizedDescription
+        }
+    }
+
+    func loadSelectedAnalysisWorkspace() async {
+        guard let selectedWorkspaceID = selectedAnalysisWorkspaceID else {
+            analysisWorkspaceError = "Select a saved analysis first."
+            return
+        }
+        guard let game = selectedGame else {
+            analysisWorkspaceError = "Select a game first."
+            return
+        }
+
+        isLoadingAnalysisWorkspace = true
+        analysisWorkspaceError = nil
+        analysisWorkspaceStatus = nil
+        defer { isLoadingAnalysisWorkspace = false }
+
+        do {
+            let loaded = try await analysisRepository.loadWorkspace(workspaceID: selectedWorkspaceID)
+
+            let normalizedLoadedPath = normalizePath(loaded.workspace.sourceDatabasePath)
+            let normalizedSelectedPath = normalizePath(game.sourceDatabasePath)
+            guard normalizedLoadedPath == normalizedSelectedPath,
+                  loaded.workspace.gameID == game.databaseID else {
+                throw RepositoryError.invalidInput("Selected workspace belongs to a different game.")
+            }
+
+            applyLoadedAnalysisWorkspace(loaded)
+            analysisWorkspaceName = loaded.workspace.name
+            loadedAnalysisWorkspaceID = loaded.workspace.id
+            loadedAnalysisWorkspaceName = loaded.workspace.name
+            analysisWorkspaceIsDirty = false
+            analysisWorkspaceStatus = "Loaded \"\(loaded.workspace.name)\"."
+        } catch {
+            analysisWorkspaceError = error.localizedDescription
+        }
+    }
+
+    func renameSelectedAnalysisWorkspace() async {
+        guard let workspaceID = selectedAnalysisWorkspaceID else {
+            analysisWorkspaceError = "Select a saved analysis first."
+            return
+        }
+        let trimmedName = analysisWorkspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            analysisWorkspaceError = "Workspace name is required."
+            return
+        }
+
+        isRenamingAnalysisWorkspace = true
+        analysisWorkspaceError = nil
+        analysisWorkspaceStatus = nil
+        defer { isRenamingAnalysisWorkspace = false }
+
+        do {
+            try await analysisRepository.renameWorkspace(workspaceID: workspaceID, name: trimmedName)
+            await refreshAnalysisWorkspaces()
+            selectedAnalysisWorkspaceID = workspaceID
+
+            if loadedAnalysisWorkspaceID == workspaceID {
+                loadedAnalysisWorkspaceName = trimmedName
+            }
+            if lastSavedAnalysisWorkspaceID == workspaceID {
+                lastSavedAnalysisWorkspaceName = trimmedName
+            }
+            analysisWorkspaceName = trimmedName
+            analysisWorkspaceStatus = "Renamed workspace to \"\(trimmedName)\"."
+        } catch {
+            analysisWorkspaceError = error.localizedDescription
+        }
+    }
+
+    func deleteSelectedAnalysisWorkspace() async {
+        guard let workspaceID = selectedAnalysisWorkspaceID else {
+            analysisWorkspaceError = "Select a saved analysis first."
+            return
+        }
+
+        let deletedName = analysisWorkspaceSummaries
+            .first(where: { $0.id == workspaceID })?
+            .name ?? "Workspace"
+
+        isDeletingAnalysisWorkspace = true
+        analysisWorkspaceError = nil
+        analysisWorkspaceStatus = nil
+        defer { isDeletingAnalysisWorkspace = false }
+
+        do {
+            try await analysisRepository.deleteWorkspace(workspaceID: workspaceID)
+            if loadedAnalysisWorkspaceID == workspaceID {
+                loadedAnalysisWorkspaceID = nil
+                loadedAnalysisWorkspaceName = nil
+                analysisWorkspaceIsDirty = false
+            }
+            if lastSavedAnalysisWorkspaceID == workspaceID {
+                lastSavedAnalysisWorkspaceID = nil
+                lastSavedAnalysisWorkspaceName = nil
+            }
+
+            await refreshAnalysisWorkspaces()
+            analysisWorkspaceStatus = "Deleted \"\(deletedName)\"."
+        } catch {
+            analysisWorkspaceError = error.localizedDescription
+        }
     }
 
     func registerDatabase(path: String, label: String? = nil) {
@@ -588,8 +1026,12 @@ final class AppState: ObservableObject {
             return
         }
 
-        if let existing = workspaceDatabases.first(where: { normalizePath($0.path) == normalizePath(normalizedPath) }) {
-            selectedImportDatabaseID = existing.id
+        if let existingIndex = workspaceDatabases.firstIndex(where: { normalizePath($0.path) == normalizePath(normalizedPath) }) {
+            workspaceDatabases[existingIndex].isActive = true
+            workspaceDatabases[existingIndex].updatedAt = Date()
+            selectedImportDatabaseID = workspaceDatabases[existingIndex].id
+            saveWorkspaceDatabases()
+            reloadWithCurrentFilter()
             return
         }
 
@@ -613,6 +1055,7 @@ final class AppState: ObservableObject {
         workspaceDatabases.append(entry)
         selectedImportDatabaseID = entry.id
         saveWorkspaceDatabases()
+        reloadWithCurrentFilter()
     }
 
     func removeDatabase(id: UUID) {
@@ -662,6 +1105,264 @@ final class AppState: ObservableObject {
             .filter { !$0.isEmpty }
     }
 
+    private func buildAnalysisWorkspaceNodeRecords(rootNodeID: UUID) -> [AnalysisWorkspaceNodeRecord] {
+        var out: [AnalysisWorkspaceNodeRecord] = []
+        var visited = Set<UUID>()
+
+        func visit(nodeID: UUID, parentID: UUID?, sortIndex: Int) {
+            guard visited.insert(nodeID).inserted else { return }
+            guard let node = analysisNodesByID[nodeID] else { return }
+
+            out.append(
+                AnalysisWorkspaceNodeRecord(
+                    id: node.id,
+                    parentID: parentID,
+                    san: node.san,
+                    uci: node.uci,
+                    fen: node.fen,
+                    comment: node.comment,
+                    nags: node.nags,
+                    sortIndex: sortIndex
+                )
+            )
+
+            for (index, childID) in node.children.enumerated() {
+                visit(nodeID: childID, parentID: nodeID, sortIndex: index)
+            }
+        }
+
+        visit(nodeID: rootNodeID, parentID: nil, sortIndex: 0)
+        return out
+    }
+
+    private func applyLoadedAnalysisWorkspace(_ loaded: LoadedAnalysisWorkspace) {
+        var nodesByID: [UUID: AnalysisNode] = [:]
+        var childrenByParent: [UUID: [(id: UUID, sortIndex: Int)]] = [:]
+
+        for node in loaded.nodes {
+            nodesByID[node.id] = AnalysisNode(
+                id: node.id,
+                parentID: node.parentID,
+                san: node.san,
+                uci: node.uci,
+                fen: node.fen,
+                comment: node.comment,
+                nags: node.nags,
+                children: []
+            )
+
+            if let parentID = node.parentID {
+                childrenByParent[parentID, default: []].append((id: node.id, sortIndex: node.sortIndex))
+            }
+        }
+
+        for (parentID, children) in childrenByParent {
+            guard var parent = nodesByID[parentID] else { continue }
+            parent.children = children
+                .sorted { lhs, rhs in
+                    if lhs.sortIndex == rhs.sortIndex {
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                    return lhs.sortIndex < rhs.sortIndex
+                }
+                .map(\.id)
+            nodesByID[parentID] = parent
+        }
+
+        guard !nodesByID.isEmpty else {
+            clearAnalysisState()
+            return
+        }
+
+        let rootNodeID = nodesByID[loaded.workspace.rootNodeID] != nil
+            ? loaded.workspace.rootNodeID
+            : loaded.nodes.first(where: { $0.parentID == nil })?.id ?? loaded.nodes.first?.id
+
+        guard let rootNodeID else {
+            clearAnalysisState()
+            return
+        }
+
+        analysisNodesByID = nodesByID
+        analysisRootNodeID = rootNodeID
+        analysisNodeIDByPly = buildMainlineNodeIDs(rootNodeID: rootNodeID, nodesByID: nodesByID)
+
+        let selectedNodeID: UUID = {
+            if let currentID = loaded.workspace.currentNodeID, nodesByID[currentID] != nil {
+                return currentID
+            }
+            return rootNodeID
+        }()
+
+        currentAnalysisNodeID = selectedNodeID
+        currentPly = anchorPly(
+            for: selectedNodeID,
+            mainline: analysisNodeIDByPly,
+            nodesByID: nodesByID
+        )
+        analysisError = nil
+        clearEngineOutput()
+    }
+
+    private func buildMainlineNodeIDs(
+        rootNodeID: UUID,
+        nodesByID: [UUID: AnalysisNode]
+    ) -> [UUID] {
+        var out: [UUID] = []
+        var visited = Set<UUID>()
+        var cursor: UUID? = rootNodeID
+
+        while let nodeID = cursor, visited.insert(nodeID).inserted {
+            out.append(nodeID)
+            cursor = nodesByID[nodeID]?.children.first
+        }
+
+        return out
+    }
+
+    private func anchorPly(
+        for selectedNodeID: UUID,
+        mainline: [UUID],
+        nodesByID: [UUID: AnalysisNode]
+    ) -> Int {
+        if let direct = mainline.firstIndex(of: selectedNodeID) {
+            return direct
+        }
+
+        var cursor: UUID? = selectedNodeID
+        var visited = Set<UUID>()
+        while let nodeID = cursor, visited.insert(nodeID).inserted {
+            if let index = mainline.firstIndex(of: nodeID) {
+                return index
+            }
+            cursor = nodesByID[nodeID]?.parentID
+        }
+
+        return 0
+    }
+
+    private func defaultAnalysisWorkspaceName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return "Analysis \(formatter.string(from: Date()))"
+    }
+
+    private func makeAnalysisPathGraphRequest() -> PathGraphRequest? {
+        guard let rootNodeID = analysisRootNodeID else { return nil }
+
+        let normalizedEnginePath = enginePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedEnginePath.isEmpty else { return nil }
+
+        let depth = max(engineDepth, 1)
+        let selectedNodeID = {
+            guard let currentAnalysisNodeID else { return rootNodeID }
+            return analysisNodesByID[currentAnalysisNodeID] != nil ? currentAnalysisNodeID : rootNodeID
+        }()
+
+        let fullPathNodeIDs = currentExploredPathNodeIDs(
+            rootNodeID: rootNodeID,
+            selectedNodeID: selectedNodeID
+        )
+        guard !fullPathNodeIDs.isEmpty else { return nil }
+
+        let isTruncated = fullPathNodeIDs.count > analysisPathGraphMaxPlies
+        let limitedNodeIDs = Array(fullPathNodeIDs.prefix(analysisPathGraphMaxPlies))
+
+        let nodeInputs: [PathGraphNodeInput] = limitedNodeIDs.enumerated().compactMap { entry in
+            let (index, nodeID) = entry
+            guard let fen = analysisNodesByID[nodeID]?.fen else { return nil }
+            return PathGraphNodeInput(nodeID: nodeID, ply: index, fen: fen)
+        }
+
+        guard !nodeInputs.isEmpty else { return nil }
+
+        let signature = PathGraphRequestSignature(
+            nodeIDs: nodeInputs.map { $0.nodeID },
+            enginePath: normalizedEnginePath,
+            depth: depth
+        )
+
+        return PathGraphRequest(
+            signature: signature,
+            nodeInputs: nodeInputs,
+            enginePath: normalizedEnginePath,
+            depth: depth,
+            isTruncated: isTruncated
+        )
+    }
+
+    private func currentExploredPathNodeIDs(rootNodeID: UUID, selectedNodeID: UUID) -> [UUID] {
+        var ancestorPath: [UUID] = []
+        var visited = Set<UUID>()
+        var cursor: UUID? = selectedNodeID
+
+        while let nodeID = cursor, visited.insert(nodeID).inserted {
+            ancestorPath.append(nodeID)
+            if nodeID == rootNodeID {
+                break
+            }
+            cursor = analysisNodesByID[nodeID]?.parentID
+        }
+
+        if ancestorPath.isEmpty {
+            ancestorPath = [rootNodeID]
+        }
+
+        ancestorPath.reverse()
+        if ancestorPath.first != rootNodeID {
+            ancestorPath.insert(rootNodeID, at: 0)
+        }
+
+        var path = ancestorPath
+        visited = Set(path)
+        var tailCursor = ancestorPath.last ?? rootNodeID
+
+        while let nextNodeID = analysisNodesByID[tailCursor]?.children.first,
+              visited.insert(nextNodeID).inserted {
+            path.append(nextNodeID)
+            tailCursor = nextNodeID
+        }
+
+        return path
+    }
+
+    private func clearAnalysisPathGraphState(clearCache: Bool) {
+        analysisPathGraphTask?.cancel()
+        analysisPathGraphTask = nil
+        analysisPathGraphPoints = []
+        isLoadingAnalysisPathGraph = false
+        analysisPathGraphProgressText = nil
+        analysisPathGraphError = nil
+        analysisPathGraphIsTruncated = false
+        lastAnalysisPathGraphSignature = nil
+        if clearCache {
+            analysisPathGraphCache.removeAll()
+        }
+    }
+
+    private func markAnalysisWorkspaceDirty() {
+        guard loadedAnalysisWorkspaceID != nil else { return }
+        analysisWorkspaceIsDirty = true
+    }
+
+    private func clearAnalysisWorkspaceState() {
+        analysisWorkspaceName = ""
+        analysisWorkspaceSummaries = []
+        selectedAnalysisWorkspaceID = nil
+        isSavingAnalysisWorkspace = false
+        isRenamingAnalysisWorkspace = false
+        isDeletingAnalysisWorkspace = false
+        isLoadingAnalysisWorkspaceList = false
+        isLoadingAnalysisWorkspace = false
+        analysisWorkspaceError = nil
+        analysisWorkspaceStatus = nil
+        loadedAnalysisWorkspaceID = nil
+        loadedAnalysisWorkspaceName = nil
+        lastSavedAnalysisWorkspaceID = nil
+        lastSavedAnalysisWorkspaceName = nil
+        analysisWorkspaceIsDirty = false
+    }
+
     private func clearReplayState() {
         stopReplayAutoPlay()
         replayFens = []
@@ -671,6 +1372,7 @@ final class AppState: ObservableObject {
         replayError = nil
         isLoadingReplay = false
         clearAnalysisState()
+        clearAnalysisWorkspaceState()
         clearEngineOutput()
     }
 
@@ -695,6 +1397,7 @@ final class AppState: ObservableObject {
             replayUcis = replay.ucis
             currentPly = 0
             rebuildAnalysisTreeFromReplay()
+            await refreshAnalysisWorkspaces()
             clearEngineOutput()
         } catch {
             stopReplayAutoPlay()
@@ -703,6 +1406,7 @@ final class AppState: ObservableObject {
             replayUcis = []
             currentPly = 0
             clearAnalysisState()
+            clearAnalysisWorkspaceState()
             let message = error.localizedDescription
             if message.contains("MissingMovetext") || message.contains("GameNotFound") {
                 replayError = nil
@@ -753,6 +1457,7 @@ final class AppState: ObservableObject {
         currentAnalysisNodeID = nil
         analysisMoveInput = ""
         analysisError = nil
+        clearAnalysisPathGraphState(clearCache: false)
     }
 
     private func syncAnalysisSelectionToCurrentPly(clearError: Bool = false) {
@@ -808,6 +1513,10 @@ final class AppState: ObservableObject {
     }
 
     private func clearEngineOutput() {
+        autoAnalyzeTask?.cancel()
+        autoAnalyzeTask = nil
+        pendingAutoAnalyzeRequest = nil
+        lastEngineRequest = nil
         engineAnalysis = nil
         engineError = nil
         isAnalyzingEngine = false

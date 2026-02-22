@@ -1,10 +1,13 @@
 use chess_prep::{
-    GameFilter, GameResultFilter, Pagination, analyze_position, apply_uci_to_fen, count_games,
-    import_pgn_file, import_pgn_file_with_progress, init_db, legal_uci_moves_for_fen, replay_game,
-    replay_game_fens, search_games,
+    AnalysisWorkspaceNode, EngineSession, GameFilter, GameResultFilter, Pagination,
+    analyze_position, analyze_position_multipv, apply_uci_to_fen, count_games, import_pgn_file,
+    delete_analysis_workspace, import_pgn_file_with_progress, init_analysis_workspace_db, init_db,
+    legal_uci_moves_for_fen, list_analysis_workspaces, load_analysis_workspace,
+    rename_analysis_workspace, replay_game, replay_game_fens, save_analysis_workspace, search_games,
 };
 
 use std::env;
+use std::io::{BufRead, Write};
 
 fn print_usage(program: &str) {
     eprintln!("Usage: {program} init <db_path>");
@@ -19,8 +22,18 @@ fn print_usage(program: &str) {
     eprintln!("       {program} replay <db_path> <game_id>");
     eprintln!("       {program} replay-meta <db_path> <game_id>");
     eprintln!("       {program} analyze <engine_path> <fen> [--depth <n>]");
+    eprintln!("       {program} analyze-multipv <engine_path> <fen> [--depth <n>] [--multipv <n>]");
+    eprintln!("       {program} engine-session <engine_path>");
     eprintln!("       {program} apply-uci <fen> <uci>");
     eprintln!("       {program} legal-uci <fen>");
+    eprintln!("       {program} analysis-init <analysis_db_path>");
+    eprintln!(
+        "       {program} analysis-save <analysis_db_path> <source_db_path> <game_id> <workspace_name> <root_node_id> <current_node_id|-> <nodes_tsv_path>"
+    );
+    eprintln!("       {program} analysis-list <analysis_db_path> <source_db_path> <game_id>");
+    eprintln!("       {program} analysis-load <analysis_db_path> <workspace_id>");
+    eprintln!("       {program} analysis-rename <analysis_db_path> <workspace_id> <workspace_name>");
+    eprintln!("       {program} analysis-delete <analysis_db_path> <workspace_id>");
 }
 
 fn parse_result(value: &str) -> Result<GameResultFilter, String> {
@@ -39,6 +52,75 @@ fn parse_u32(name: &str, value: &str) -> Result<u32, String> {
     value
         .parse::<u32>()
         .map_err(|_| format!("invalid {name} '{value}', expected a non-negative integer"))
+}
+
+fn parse_i64(name: &str, value: &str) -> Result<i64, String> {
+    value
+        .parse::<i64>()
+        .map_err(|_| format!("invalid {name} '{value}', expected an integer"))
+}
+
+fn optional_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn parse_analysis_nodes_tsv(path: &str) -> Result<Vec<AnalysisWorkspaceNode>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read nodes TSV '{path}': {err}"))?;
+
+    let mut nodes = Vec::new();
+
+    for (line_index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let columns: Vec<&str> = line.split('\t').collect();
+        if columns.len() != 8 {
+            return Err(format!(
+                "invalid nodes TSV line {}: expected 8 columns, got {}",
+                line_index + 1,
+                columns.len()
+            ));
+        }
+
+        let sort_index = columns[7].parse::<i32>().map_err(|_| {
+            format!(
+                "invalid sort_index at line {}: '{}'",
+                line_index + 1,
+                columns[7]
+            )
+        })?;
+
+        let nags = columns[6]
+            .split(',')
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        nodes.push(AnalysisWorkspaceNode {
+            id: columns[0].trim().to_owned(),
+            parent_id: optional_text(columns[1]),
+            san: optional_text(columns[2]),
+            uci: optional_text(columns[3]),
+            fen: columns[4].to_owned(),
+            comment: columns[5].to_owned(),
+            nags,
+            sort_index,
+        });
+    }
+
+    if nodes.is_empty() {
+        return Err("nodes TSV has no rows".to_string());
+    }
+
+    Ok(nodes)
 }
 
 fn parse_search_options(args: &[String]) -> Result<(GameFilter, Pagination), String> {
@@ -113,8 +195,27 @@ fn parse_search_options(args: &[String]) -> Result<(GameFilter, Pagination), Str
     Ok((filter, page))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AnalyzeOptions {
+    depth: u32,
+    multipv: u32,
+}
+
+fn parse_multipv(value: &str) -> Result<u32, String> {
+    let parsed = parse_u32("multipv", value)?;
+    if parsed == 0 || parsed > 10 {
+        return Err("invalid multipv, expected an integer in range 1..=10".to_string());
+    }
+    Ok(parsed)
+}
+
 fn parse_analyze_options(args: &[String]) -> Result<u32, String> {
+    Ok(parse_analyze_multipv_options(args)?.depth)
+}
+
+fn parse_analyze_multipv_options(args: &[String]) -> Result<AnalyzeOptions, String> {
     let mut depth = 18u32;
+    let mut multipv = 1u32;
     let mut i = 0usize;
 
     while i < args.len() {
@@ -126,15 +227,185 @@ fn parse_analyze_options(args: &[String]) -> Result<u32, String> {
                 depth = parse_u32("depth", value)?;
                 i += 2;
             }
+            "--multipv" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "missing value for --multipv".to_string())?;
+                multipv = parse_multipv(value)?;
+                i += 2;
+            }
             unknown => return Err(format!("unknown option '{unknown}'")),
         }
     }
 
-    Ok(depth)
+    Ok(AnalyzeOptions { depth, multipv })
 }
 
 fn tsv_escape(value: Option<&str>) -> String {
     value.unwrap_or("").replace(['\t', '\n', '\r'], " ")
+}
+
+fn write_session_line(line: &str) -> Result<(), String> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{line}").map_err(|err| format!("failed to write session output: {err}"))?;
+    stdout
+        .flush()
+        .map_err(|err| format!("failed to flush session output: {err}"))
+}
+
+fn run_engine_session(engine_path: &str) -> Result<(), String> {
+    let mut session = EngineSession::start(engine_path)
+        .map_err(|err| format!("failed to start engine session '{engine_path}': {err:?}"))?;
+
+    write_session_line("ready")?;
+
+    let stdin = std::io::stdin();
+    let mut input = String::new();
+    let mut handle = stdin.lock();
+
+    loop {
+        input.clear();
+        let bytes = handle
+            .read_line(&mut input)
+            .map_err(|err| format!("failed to read session command: {err}"))?;
+        if bytes == 0 {
+            break;
+        }
+
+        let command_line = input.trim_end_matches(['\n', '\r']);
+        if command_line.trim().is_empty() {
+            continue;
+        }
+
+        if command_line == "quit" {
+            write_session_line("bye")?;
+            break;
+        }
+
+        if command_line == "ping" {
+            write_session_line("pong")?;
+            continue;
+        }
+
+        if command_line.starts_with("analyze-multipv\t") {
+            let mut parts = command_line.splitn(4, '\t');
+            let _ = parts.next();
+            let depth_text = parts.next().unwrap_or_default();
+            let multipv_text = parts.next().unwrap_or_default();
+            let fen = parts.next().unwrap_or_default().trim();
+            if fen.is_empty() {
+                write_session_line("err\tfen is required")?;
+                continue;
+            }
+
+            let depth = match parse_u32("depth", depth_text) {
+                Ok(value) => value,
+                Err(message) => {
+                    write_session_line(&format!("err\t{}", tsv_escape(Some(&message))))?;
+                    continue;
+                }
+            };
+
+            let multipv = match parse_multipv(multipv_text) {
+                Ok(value) => value,
+                Err(message) => {
+                    write_session_line(&format!("err\t{}", tsv_escape(Some(&message))))?;
+                    continue;
+                }
+            };
+
+            match session.analyze_multipv(fen, depth, multipv) {
+                Ok(analysis) => {
+                    let summary = format!(
+                        "ok-multipv\t{}\t{}\t{}\t{}\t{}",
+                        analysis.depth,
+                        analysis
+                            .score_cp
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        analysis
+                            .score_mate
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        tsv_escape(analysis.bestmove.as_deref()),
+                        tsv_escape(Some(&analysis.pv.join(" ")))
+                    );
+                    write_session_line(&summary)?;
+
+                    for line in analysis.lines {
+                        let row = format!(
+                            "line\t{}\t{}\t{}\t{}\t{}\t{}",
+                            line.multipv_rank,
+                            line.depth,
+                            line.score_cp
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
+                            line.score_mate
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
+                            tsv_escape(Some(&line.pv.join(" "))),
+                            tsv_escape(Some(&line.san_pv.join(" ")))
+                        );
+                        write_session_line(&row)?;
+                    }
+                    write_session_line("done")?;
+                }
+                Err(err) => {
+                    let message = format!("{err:?}");
+                    write_session_line(&format!("err\t{}", tsv_escape(Some(&message))))?;
+                }
+            }
+            continue;
+        }
+
+        if command_line.starts_with("analyze\t") {
+            let mut parts = command_line.splitn(3, '\t');
+            let _ = parts.next();
+            let depth_text = parts.next().unwrap_or_default();
+            let fen = parts.next().unwrap_or_default().trim();
+            if fen.is_empty() {
+                write_session_line("err\tfen is required")?;
+                continue;
+            }
+
+            let depth = match parse_u32("depth", depth_text) {
+                Ok(value) => value,
+                Err(message) => {
+                    write_session_line(&format!("err\t{}", tsv_escape(Some(&message))))?;
+                    continue;
+                }
+            };
+
+            match session.analyze(fen, depth) {
+                Ok(analysis) => {
+                    let line = format!(
+                        "ok\t{}\t{}\t{}\t{}\t{}",
+                        analysis.depth,
+                        analysis
+                            .score_cp
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        analysis
+                            .score_mate
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        tsv_escape(analysis.bestmove.as_deref()),
+                        tsv_escape(Some(&analysis.pv.join(" ")))
+                    );
+                    write_session_line(&line)?;
+                }
+                Err(err) => {
+                    let message = format!("{err:?}");
+                    write_session_line(&format!("err\t{}", tsv_escape(Some(&message))))?;
+                }
+            }
+            continue;
+        }
+
+        write_session_line("err\tunknown command")?;
+    }
+
+    Ok(())
 }
 
 fn run() -> Result<(), String> {
@@ -278,6 +549,165 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        [_, command, engine_path, fen, rest @ ..] if command == "analyze-multipv" => {
+            let options = parse_analyze_multipv_options(rest)?;
+            let analysis =
+                analyze_position_multipv(engine_path, fen, options.depth, options.multipv)
+                    .map_err(|err| {
+                        format!("failed to analyze position with engine '{engine_path}': {err:?}")
+                    })?;
+
+            println!(
+                "summary\t{}\t{}\t{}\t{}\t{}",
+                analysis.depth,
+                analysis
+                    .score_cp
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                analysis
+                    .score_mate
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                tsv_escape(analysis.bestmove.as_deref()),
+                tsv_escape(Some(&analysis.pv.join(" ")))
+            );
+
+            for line in analysis.lines {
+                println!(
+                    "line\t{}\t{}\t{}\t{}\t{}\t{}",
+                    line.multipv_rank,
+                    line.depth,
+                    line.score_cp
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    line.score_mate
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    tsv_escape(Some(&line.pv.join(" "))),
+                    tsv_escape(Some(&line.san_pv.join(" ")))
+                );
+            }
+            Ok(())
+        }
+        [_, command, engine_path] if command == "engine-session" => run_engine_session(engine_path),
+        [_, command, analysis_db_path] if command == "analysis-init" => {
+            init_analysis_workspace_db(analysis_db_path).map_err(|err| {
+                format!(
+                    "failed to initialize analysis workspace db at '{analysis_db_path}': {err:?}"
+                )
+            })
+        }
+
+        [
+            _,
+            command,
+            analysis_db_path,
+            source_db_path,
+            game_id,
+            workspace_name,
+            root_node_id,
+            current_node_id,
+            nodes_tsv_path,
+        ] if command == "analysis-save" => {
+            let game_id = parse_i64("game_id", game_id)?;
+            let nodes = parse_analysis_nodes_tsv(nodes_tsv_path)?;
+            let current_node_id = if current_node_id == "-" {
+                None
+            } else {
+                Some(current_node_id.as_str())
+            };
+
+            let workspace_id = save_analysis_workspace(
+                analysis_db_path,
+                source_db_path,
+                game_id,
+                workspace_name,
+                root_node_id,
+                current_node_id,
+                &nodes,
+            )
+            .map_err(|err| format!("failed to save analysis workspace: {err:?}"))?;
+
+            println!("{workspace_id}");
+            Ok(())
+        }
+
+        [_, command, analysis_db_path, source_db_path, game_id] if command == "analysis-list" => {
+            let game_id = parse_i64("game_id", game_id)?;
+            let workspaces = list_analysis_workspaces(analysis_db_path, source_db_path, game_id)
+                .map_err(|err| format!("failed to list analysis workspaces: {err:?}"))?;
+
+            for workspace in workspaces {
+                println!(
+                    "workspace\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    workspace.id,
+                    tsv_escape(Some(&workspace.source_db_path)),
+                    workspace.game_id,
+                    tsv_escape(Some(&workspace.name)),
+                    tsv_escape(Some(&workspace.root_node_id)),
+                    tsv_escape(workspace.current_node_id.as_deref()),
+                    workspace.created_at,
+                    workspace.updated_at
+                );
+            }
+            Ok(())
+        }
+
+        [_, command, analysis_db_path, workspace_id] if command == "analysis-load" => {
+            let workspace_id = parse_i64("workspace_id", workspace_id)?;
+            let loaded = load_analysis_workspace(analysis_db_path, workspace_id)
+                .map_err(|err| format!("failed to load analysis workspace: {err:?}"))?;
+
+            let workspace = loaded.workspace;
+            println!(
+                "workspace\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                workspace.id,
+                tsv_escape(Some(&workspace.source_db_path)),
+                workspace.game_id,
+                tsv_escape(Some(&workspace.name)),
+                tsv_escape(Some(&workspace.root_node_id)),
+                tsv_escape(workspace.current_node_id.as_deref()),
+                workspace.created_at,
+                workspace.updated_at
+            );
+
+            for node in loaded.nodes {
+                let nags = if node.nags.is_empty() {
+                    String::new()
+                } else {
+                    node.nags.join(",")
+                };
+
+                println!(
+                    "node\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    tsv_escape(Some(&node.id)),
+                    tsv_escape(node.parent_id.as_deref()),
+                    tsv_escape(node.san.as_deref()),
+                    tsv_escape(node.uci.as_deref()),
+                    tsv_escape(Some(&node.fen)),
+                    tsv_escape(Some(&node.comment)),
+                    tsv_escape(Some(&nags)),
+                    node.sort_index
+                );
+            }
+
+            Ok(())
+        }
+        [_, command, analysis_db_path, workspace_id, workspace_name] if command == "analysis-rename" => {
+            let workspace_id = parse_i64("workspace_id", workspace_id)?;
+            rename_analysis_workspace(analysis_db_path, workspace_id, workspace_name)
+                .map_err(|err| format!("failed to rename analysis workspace: {err:?}"))?;
+            println!("ok");
+            Ok(())
+        }
+        [_, command, analysis_db_path, workspace_id] if command == "analysis-delete" => {
+            let workspace_id = parse_i64("workspace_id", workspace_id)?;
+            delete_analysis_workspace(analysis_db_path, workspace_id)
+                .map_err(|err| format!("failed to delete analysis workspace: {err:?}"))?;
+            println!("ok");
+            Ok(())
+        }
+
         [program, ..] => {
             print_usage(program);
             Err("invalid command".to_string())

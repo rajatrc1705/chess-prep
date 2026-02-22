@@ -13,10 +13,21 @@ struct ChessPrepApp: App {
                 .preferredColorScheme(.light)
                 .tint(Theme.accent)
                 .onAppear {
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
+                    configureAppAppearance()
                 }
         }
         .windowStyle(.titleBar)
+    }
+
+    private func configureAppAppearance() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
+              let iconImage = NSImage(contentsOf: iconURL) else {
+            return
+        }
+
+        NSApp.applicationIconImage = iconImage
     }
 }
