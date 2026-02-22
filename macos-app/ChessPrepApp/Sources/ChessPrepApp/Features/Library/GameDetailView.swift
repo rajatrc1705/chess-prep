@@ -31,11 +31,84 @@ struct GameDetailView: View {
         let hasNestedVariations: Bool
     }
 
-    private struct LineToken {
+    private struct LineToken: Identifiable {
+        var id: UUID { nodeID }
         let nodeID: UUID
         let moveCore: String
         let nags: String
         let annotation: String
+    }
+
+    private struct MoveTokenFlowLayout: Layout {
+        let itemSpacing: CGFloat
+        let lineSpacing: CGFloat
+
+        init(itemSpacing: CGFloat = 6, lineSpacing: CGFloat = 6) {
+            self.itemSpacing = itemSpacing
+            self.lineSpacing = lineSpacing
+        }
+
+        func sizeThatFits(
+            proposal: ProposedViewSize,
+            subviews: Subviews,
+            cache: inout ()
+        ) -> CGSize {
+            let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+            guard !subviews.isEmpty else { return .zero }
+
+            var x: CGFloat = 0
+            var y: CGFloat = 0
+            var rowHeight: CGFloat = 0
+            var usedWidth: CGFloat = 0
+
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                if x > 0, x + size.width > maxWidth {
+                    y += rowHeight + lineSpacing
+                    x = 0
+                    rowHeight = 0
+                }
+
+                usedWidth = max(usedWidth, x + size.width)
+                x += size.width + itemSpacing
+                rowHeight = max(rowHeight, size.height)
+            }
+
+            return CGSize(
+                width: proposal.width ?? usedWidth,
+                height: y + rowHeight
+            )
+        }
+
+        func placeSubviews(
+            in bounds: CGRect,
+            proposal: ProposedViewSize,
+            subviews: Subviews,
+            cache: inout ()
+        ) {
+            let maxWidth = bounds.width
+            var x = bounds.minX
+            var y = bounds.minY
+            var rowHeight: CGFloat = 0
+
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                if x > bounds.minX, x + size.width > bounds.minX + maxWidth {
+                    y += rowHeight + lineSpacing
+                    x = bounds.minX
+                    rowHeight = 0
+                }
+
+                subview.place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+
+                x += size.width + itemSpacing
+                rowHeight = max(rowHeight, size.height)
+            }
+        }
     }
 
     init(state: AppState, locator: GameLocator? = nil) {
@@ -237,6 +310,12 @@ struct GameDetailView: View {
                     statusChip(title: "Node", value: state.currentAnalysisNode?.san ?? "Start")
                 }
 
+                if let analysisError = state.analysisError {
+                    Text(analysisError)
+                        .font(Typography.body)
+                        .foregroundStyle(Theme.error)
+                }
+
                 if !isCurrentAnalysisOnReplayMainline {
                     Text("Viewing analysis variation from replay ply \(state.currentPly).")
                         .font(Typography.detailLabel)
@@ -363,6 +442,7 @@ struct GameDetailView: View {
 
     private func analysisDisplayLineView(_ line: AnalysisDisplayLine) -> some View {
         let isCollapsed = collapsedAnalysisNodeIDs.contains(line.rootNodeID)
+        let tokens = lineTokens(for: line)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 8) {
@@ -392,46 +472,30 @@ struct GameDetailView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
 
-                Button {
-                    selectAnalysisNodeFromMoveList(line.rootNodeID)
-                } label: {
-                    Text(lineAttributedString(for: line))
-                        .font(Typography.dataMono)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                }
-                .buttonStyle(.plain)
-                .contextMenu {
-                    Button("Annotate") {
-                        annotateMove(line.rootNodeID)
+                MoveTokenFlowLayout(itemSpacing: 6, lineSpacing: 6) {
+                    if line.isVariation {
+                        Text("(")
+                            .font(Typography.dataMono)
+                            .foregroundStyle(Theme.textSecondary)
                     }
 
-                    Button("Delete Move", role: .destructive) {
-                        state.deleteAnalysisNode(id: line.rootNodeID)
+                    ForEach(tokens) { token in
+                        moveTokenButton(token)
                     }
-                    .disabled(!canDeleteMove(line.rootNodeID))
 
-                    Divider()
-
-                    ForEach(annotationSymbolOptions, id: \.self) { symbol in
-                        Button {
-                            applyAnnotationSymbol(symbol, to: line.rootNodeID)
-                        } label: {
-                            if isAnnotationSymbolSelected(symbol, on: line.rootNodeID) {
-                                Label(symbol, systemImage: "checkmark")
-                            } else {
-                                Text(symbol)
-                            }
-                        }
+                    if line.isVariation {
+                        Text(")")
+                            .font(Typography.dataMono)
+                            .foregroundStyle(Theme.textSecondary)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if editingAnnotationNodeID == line.rootNodeID {
+            if let editingNodeID = editingAnnotationNodeID,
+               line.nodeIDs.contains(editingNodeID) {
                 inlineAnnotationEditor(
-                    nodeID: line.rootNodeID,
+                    nodeID: editingNodeID,
                     depth: line.depth,
                     isVariation: line.isVariation
                 )
@@ -486,43 +550,62 @@ struct GameDetailView: View {
         .padding(.trailing, 6)
     }
 
-    private func lineAttributedString(for line: AnalysisDisplayLine) -> AttributedString {
-        let tokens = lineTokens(for: line)
-        var text = AttributedString()
+    private func moveTokenButton(_ token: LineToken) -> some View {
+        Button {
+            selectAnalysisNodeFromMoveList(token.nodeID)
+        } label: {
+            Text(tokenAttributedString(token))
+                .font(Typography.dataMono)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    token.nodeID == state.currentAnalysisNodeID
+                        ? Theme.accent.opacity(0.28)
+                        : .clear
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Annotate") {
+                annotateMove(token.nodeID)
+            }
 
-        if line.isVariation {
-            text += AttributedString("( ")
+            Button("Delete Move", role: .destructive) {
+                state.deleteAnalysisNode(id: token.nodeID)
+            }
+            .disabled(!canDeleteMove(token.nodeID))
+
+            Divider()
+
+            ForEach(annotationSymbolOptions, id: \.self) { symbol in
+                Button {
+                    applyAnnotationSymbol(symbol, to: token.nodeID)
+                } label: {
+                    if isAnnotationSymbolSelected(symbol, on: token.nodeID) {
+                        Label(symbol, systemImage: "checkmark")
+                    } else {
+                        Text(symbol)
+                    }
+                }
+            }
+        }
+    }
+
+    private func tokenAttributedString(_ token: LineToken) -> AttributedString {
+        var text = AttributedString(token.moveCore)
+        text.foregroundColor = Theme.textPrimary
+
+        if !token.nags.isEmpty {
+            var nagsPart = AttributedString(" \(token.nags)")
+            nagsPart.foregroundColor = Theme.accent
+            text += nagsPart
         }
 
-        for (index, token) in tokens.enumerated() {
-            let isSelectedMove = token.nodeID == state.currentAnalysisNodeID
-
-            var movePart = AttributedString(token.moveCore)
-            movePart.foregroundColor = Theme.textPrimary
-            if isSelectedMove {
-                movePart.backgroundColor = Theme.accent.opacity(0.28)
-            }
-            text += movePart
-
-            if !token.nags.isEmpty {
-                var nagsPart = AttributedString(" \(token.nags)")
-                nagsPart.foregroundColor = Theme.accent
-                text += nagsPart
-            }
-
-            if !token.annotation.isEmpty {
-                var commentPart = AttributedString(" \(token.annotation)")
-                commentPart.foregroundColor = Color(red: 0.20, green: 0.42, blue: 0.21)
-                text += commentPart
-            }
-
-            if index + 1 < tokens.count {
-                text += AttributedString(" ")
-            }
-        }
-
-        if line.isVariation {
-            text += AttributedString(" )")
+        if !token.annotation.isEmpty {
+            var commentPart = AttributedString(" \(token.annotation)")
+            commentPart.foregroundColor = Color(red: 0.20, green: 0.42, blue: 0.21)
+            text += commentPart
         }
 
         return text
@@ -815,14 +898,17 @@ struct GameDetailView: View {
     }
 
     private func applyAnnotationSymbol(_ symbol: String, to nodeID: UUID) {
+        closeInlineAnnotationEditor()
         selectAnalysisNodeFromMoveList(nodeID)
         state.applyAnalysisAnnotationSymbol(id: nodeID, symbol: symbol)
-        editingAnnotationNodeID = nodeID
     }
 
     private func closeInlineAnnotationEditor() {
         editingAnnotationNodeID = nil
         inlineAnnotationFocusID = nil
+        DispatchQueue.main.async {
+            replayFocused = true
+        }
     }
 
     private func isAnnotationSymbolSelected(_ symbol: String, on nodeID: UUID) -> Bool {

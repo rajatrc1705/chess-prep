@@ -7,6 +7,7 @@ struct ChessBoardView: View {
     let lastMove: (from: String, to: String)?
     let legalMovesByFrom: [String: [String: String]]
     let moveAnnotationBadge: (symbol: String, color: Color)?
+    let showCoordinates: Bool
     let cellSize: CGFloat
     let onMoveAttempt: ((String) -> Void)?
 
@@ -23,6 +24,7 @@ struct ChessBoardView: View {
         lastMove: (from: String, to: String)? = nil,
         legalMovesByFrom: [String: [String: String]] = [:],
         moveAnnotationBadge: (symbol: String, color: Color)? = nil,
+        showCoordinates: Bool = true,
         cellSize: CGFloat = 46,
         onMoveAttempt: ((String) -> Void)? = nil
     ) {
@@ -32,6 +34,7 @@ struct ChessBoardView: View {
         self.lastMove = lastMove
         self.legalMovesByFrom = legalMovesByFrom
         self.moveAnnotationBadge = moveAnnotationBadge
+        self.showCoordinates = showCoordinates
         self.cellSize = cellSize
         self.onMoveAttempt = onMoveAttempt
     }
@@ -39,7 +42,6 @@ struct ChessBoardView: View {
     var body: some View {
         let board = boardMatrix(from: fen)
         let boardSize = cellSize * 8
-        let dragHighlights = Set([dragStartSquare, dragCurrentSquare].compactMap { $0 })
         let selectedTargets = selectedSquare.map { legalTargets(from: $0) } ?? []
         let dragTargets = dragStartSquare.map { legalTargets(from: $0) } ?? []
 
@@ -53,11 +55,22 @@ struct ChessBoardView: View {
                             let piece = board[boardRank][boardFile]
                             let isDark = (boardRank + boardFile).isMultiple(of: 2)
                             let square = squareName(rankIndex: boardRank, fileIndex: boardFile)
-                            let isHighlighted = highlightedSquares.contains(square)
-                                || dragHighlights.contains(square)
-                                || selectedSquare == square
-                                || selectedTargets.contains(square)
-                                || dragTargets.contains(square)
+                            let isLastMoveSquare = highlightedSquares.contains(square)
+                            let isSelectedOrigin = selectedSquare == square || dragStartSquare == square
+                            let isActiveTarget = selectedTargets.contains(square) || dragTargets.contains(square)
+                            let isDragHoverSquare = dragCurrentSquare == square
+                            let highlightColor: Color? = {
+                                if isDragHoverSquare || isSelectedOrigin {
+                                    return Color(red: 0.37, green: 0.60, blue: 0.78).opacity(0.70)
+                                }
+                                if isActiveTarget {
+                                    return Color(red: 0.89, green: 0.85, blue: 0.42).opacity(0.76)
+                                }
+                                if isLastMoveSquare {
+                                    return Color(red: 0.89, green: 0.85, blue: 0.42).opacity(0.52)
+                                }
+                                return nil
+                            }()
                             let hidePiece = dragStartSquare == square && dragPiece != nil
 
                             ZStack {
@@ -65,9 +78,9 @@ struct ChessBoardView: View {
                                     .fill(isDark ? explorerDark : explorerLight)
                                     .frame(width: cellSize, height: cellSize)
 
-                                if isHighlighted {
+                                if let highlightColor {
                                     Rectangle()
-                                        .fill(Color.yellow.opacity(0.34))
+                                        .fill(highlightColor)
                                         .frame(width: cellSize, height: cellSize)
                                 }
 
@@ -80,6 +93,10 @@ struct ChessBoardView: View {
                 }
             }
 
+            if showCoordinates {
+                boardCoordinatesOverlay(boardSize: boardSize)
+            }
+
             if let lastMove,
                let from = boardPoint(for: lastMove.from),
                let to = boardPoint(for: lastMove.to) {
@@ -89,7 +106,8 @@ struct ChessBoardView: View {
                     boardAnnotationBadge(
                         symbol: moveAnnotationBadge.symbol,
                         color: moveAnnotationBadge.color,
-                        destination: to
+                        destination: to,
+                        boardSize: boardSize
                     )
                 }
             }
@@ -102,10 +120,11 @@ struct ChessBoardView: View {
             }
         }
         .frame(width: boardSize, height: boardSize)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .background(Color(red: 0.08, green: 0.11, blue: 0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(explorerBorder, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 24)
+                .stroke(explorerBorder, lineWidth: 2.5)
         )
         .contentShape(Rectangle())
         .gesture(dragGesture(board: board, boardSize: boardSize))
@@ -308,8 +327,20 @@ struct ChessBoardView: View {
         }
     }
 
-    private func boardAnnotationBadge(symbol: String, color: Color, destination: CGPoint) -> some View {
-        Text(symbol)
+    private func boardAnnotationBadge(
+        symbol: String,
+        color: Color,
+        destination: CGPoint,
+        boardSize: CGFloat
+    ) -> some View {
+        let badgeWidth = max(cellSize * 0.45, CGFloat(symbol.count) * cellSize * 0.20 + 12)
+        let badgeHeight = max(cellSize * 0.26, 20)
+        let intendedX = destination.x + cellSize * 0.28
+        let intendedY = destination.y - cellSize * 0.30
+        let x = min(max(intendedX, badgeWidth / 2 + 2), boardSize - badgeWidth / 2 - 2)
+        let y = min(max(intendedY, badgeHeight / 2 + 2), boardSize - badgeHeight / 2 - 2)
+
+        return Text(symbol)
             .font(.system(size: max(11, cellSize * 0.24), weight: .bold, design: .rounded))
             .foregroundStyle(Color.white)
             .padding(.horizontal, 6)
@@ -323,10 +354,46 @@ struct ChessBoardView: View {
                     .stroke(Color.black.opacity(0.2), lineWidth: 1)
             )
             .position(
-                x: destination.x + cellSize * 0.28,
-                y: destination.y - cellSize * 0.30
+                x: x,
+                y: y
             )
             .allowsHitTesting(false)
+    }
+
+    private func boardCoordinatesOverlay(boardSize: CGFloat) -> some View {
+        ZStack {
+            ForEach(0..<8, id: \.self) { displayRow in
+                Text(rankLabel(for: displayRow))
+                    .font(.system(size: max(10, cellSize * 0.24), weight: .semibold, design: .rounded))
+                    .foregroundStyle(coordinateLabelColor)
+                    .position(
+                        x: cellSize * 0.11,
+                        y: CGFloat(displayRow) * cellSize + cellSize * 0.16
+                    )
+            }
+
+            ForEach(0..<8, id: \.self) { displayCol in
+                Text(fileLabel(for: displayCol))
+                    .font(.system(size: max(10, cellSize * 0.24), weight: .semibold, design: .rounded))
+                    .foregroundStyle(coordinateLabelColor)
+                    .position(
+                        x: CGFloat(displayCol) * cellSize + cellSize * 0.88,
+                        y: boardSize - cellSize * 0.12
+                    )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func fileLabel(for displayCol: Int) -> String {
+        let boardFile = whiteAtBottom ? displayCol : 7 - displayCol
+        let fileUnicode = UnicodeScalar(97 + boardFile) ?? UnicodeScalar(97)!
+        return String(Character(fileUnicode))
+    }
+
+    private func rankLabel(for displayRow: Int) -> String {
+        let boardRank = whiteAtBottom ? displayRow : 7 - displayRow
+        return String(8 - boardRank)
     }
 
     private func squareName(rankIndex: Int, fileIndex: Int) -> String {
@@ -361,6 +428,8 @@ struct ChessBoardView: View {
 
     private func symbol(for piece: Character) -> String {
         switch piece {
+        // Use the filled glyph set for both sides, then color by side in pieceGlyph(for:).
+        // The outline-only "white" Unicode set can look hollow on top of board squares.
         case "K": return "♚"
         case "Q": return "♛"
         case "R": return "♜"
@@ -378,46 +447,55 @@ struct ChessBoardView: View {
     }
 
     private var explorerDark: Color {
-        Color(red: 0.36, green: 0.24, blue: 0.16)
+        Color(red: 0.70, green: 0.54, blue: 0.40)
     }
 
     private var explorerLight: Color {
-        Color(red: 0.84, green: 0.73, blue: 0.57)
+        Color(red: 0.85, green: 0.78, blue: 0.63)
     }
 
     private var explorerBorder: Color {
-        Color(red: 0.23, green: 0.15, blue: 0.10).opacity(0.85)
+        Color(red: 0.06, green: 0.09, blue: 0.13).opacity(0.95)
+    }
+
+    private var coordinateLabelColor: Color {
+        Color(red: 0.95, green: 0.89, blue: 0.78).opacity(0.78)
     }
 
     @ViewBuilder
     private func pieceGlyph(for piece: Character) -> some View {
         let glyph = symbol(for: piece)
-        let pieceFont = Font.system(size: cellSize * 0.67)
+        let pieceFont = Font.system(size: cellSize * 0.78, weight: .regular, design: .serif)
+        let isWhitePiece = piece.isUppercase
+        let fillColor = isWhitePiece
+            ? Color.white
+            : Color(red: 0.31, green: 0.31, blue: 0.31)
+        let strokeColor = isWhitePiece
+            ? Color(red: 0.22, green: 0.22, blue: 0.22).opacity(0.98)
+            : Color(red: 0.14, green: 0.14, blue: 0.14).opacity(0.96)
+        let offsets: [CGSize] = [
+            CGSize(width: -0.9, height: 0),
+            CGSize(width: 0.9, height: 0),
+            CGSize(width: 0, height: -0.9),
+            CGSize(width: 0, height: 0.9),
+            CGSize(width: -0.7, height: -0.7),
+            CGSize(width: 0.7, height: -0.7),
+            CGSize(width: -0.7, height: 0.7),
+            CGSize(width: 0.7, height: 0.7),
+        ]
 
-        if piece.isUppercase {
-            let offsets: [CGSize] = [
-                CGSize(width: -0.7, height: 0),
-                CGSize(width: 0.7, height: 0),
-                CGSize(width: 0, height: -0.7),
-                CGSize(width: 0, height: 0.7),
-            ]
-
-            ZStack {
-                ForEach(Array(offsets.enumerated()), id: \.offset) { _, offset in
-                    Text(glyph)
-                        .font(pieceFont)
-                        .foregroundStyle(Color.black.opacity(0.95))
-                        .offset(x: offset.width, y: offset.height)
-                }
-
+        ZStack {
+            ForEach(Array(offsets.enumerated()), id: \.offset) { _, offset in
                 Text(glyph)
                     .font(pieceFont)
-                    .foregroundStyle(Color(red: 0.95, green: 0.94, blue: 0.90))
+                    .foregroundStyle(strokeColor)
+                    .offset(x: offset.width, y: offset.height)
             }
-        } else {
+
             Text(glyph)
                 .font(pieceFont)
-                .foregroundStyle(Color.black)
+                .foregroundStyle(fillColor)
         }
+        .shadow(color: .black.opacity(isWhitePiece ? 0.08 : 0.16), radius: 1.5, x: 0, y: 1)
     }
 }

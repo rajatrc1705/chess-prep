@@ -112,6 +112,7 @@ struct GamePreviewView: View {
                     whiteAtBottom: true,
                     highlightedSquares: [],
                     lastMove: nil,
+                    showCoordinates: false,
                     cellSize: 24
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
