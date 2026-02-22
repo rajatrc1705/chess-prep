@@ -42,11 +42,14 @@ struct GameDetailView: View {
         let annotation: String
     }
 
-    private struct PathGraphPlotPoint: Identifiable {
+    private struct PathGraphBarEntry: Identifiable {
         let nodeID: UUID
         let ply: Int
         let x: CGFloat
-        let y: CGFloat
+        let height: CGFloat
+        let width: CGFloat
+        let isPositive: Bool
+        let isEvaluated: Bool
         let scoreLabel: String
 
         var id: UUID { nodeID }
@@ -268,6 +271,16 @@ struct GameDetailView: View {
                     .foregroundStyle(Theme.error)
             } else if let replayFen = state.currentFen {
                 let boardFen = state.currentAnalysisFen ?? replayFen
+                pathEbbFlowPanel
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Theme.surfaceAlt.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Theme.border.opacity(0.25), lineWidth: 1)
+                    )
+
                 HStack(alignment: .top, spacing: 18) {
                     ChessBoardView(
                         fen: boardFen,
@@ -769,13 +782,7 @@ struct GameDetailView: View {
     }
 
     private var moveNotationEngineLinesPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            pathEbbFlowPanel
-
-            Divider()
-
-            engineLinesPanel
-        }
+        engineLinesPanel
     }
 
     private var pathEbbFlowPanel: some View {
@@ -794,7 +801,7 @@ struct GameDetailView: View {
                 }
             }
 
-            ZStack(alignment: .bottomLeading) {
+            ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Theme.surfaceAlt.opacity(0.35))
 
@@ -806,48 +813,47 @@ struct GameDetailView: View {
                         .padding(.horizontal, 8)
                 } else {
                     GeometryReader { proxy in
-                        let values = state.analysisPathGraphPoints.compactMap(\.plotValue)
-                        let range = pathGraphValueRange(for: values)
-                        let plotPoints = pathGraphPlotPoints(in: proxy.size)
-                        let zeroY = pathGraphY(
-                            value: 0,
-                            minValue: range.min,
-                            maxValue: range.max,
-                            height: proxy.size.height,
-                            padding: 8
-                        )
+                        let canvasWidth = pathGraphCanvasWidth(availableWidth: proxy.size.width)
+                        ScrollView(.horizontal, showsIndicators: true) {
+                            let canvasSize = CGSize(width: canvasWidth, height: proxy.size.height)
+                            let bars = pathGraphBarEntries(in: canvasSize)
+                            let centerY = canvasSize.height / 2
 
-                        ZStack(alignment: .topLeading) {
-                            Path { path in
-                                path.move(to: CGPoint(x: 8, y: zeroY))
-                                path.addLine(to: CGPoint(x: max(proxy.size.width - 8, 8), y: zeroY))
-                            }
-                            .stroke(Theme.border.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                            ZStack(alignment: .topLeading) {
+                                Path { path in
+                                    path.move(to: CGPoint(x: 8, y: centerY))
+                                    path.addLine(to: CGPoint(x: max(canvasSize.width - 8, 8), y: centerY))
+                                }
+                                .stroke(Theme.border.opacity(0.4), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
 
-                            Path { path in
-                                guard let first = plotPoints.first else { return }
-                                path.move(to: CGPoint(x: first.x, y: first.y))
-                                for point in plotPoints.dropFirst() {
-                                    path.addLine(to: CGPoint(x: point.x, y: point.y))
+                                ForEach(bars) { bar in
+                                    Button {
+                                        selectAnalysisNodeFromMoveList(bar.nodeID)
+                                    } label: {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(pathGraphBarColor(for: bar))
+                                            .frame(width: bar.width, height: bar.height)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 2)
+                                                    .stroke(
+                                                        bar.nodeID == state.currentAnalysisNodeID
+                                                            ? Theme.accent
+                                                            : .clear,
+                                                        lineWidth: 1.5
+                                                    )
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .position(
+                                        x: bar.x,
+                                        y: bar.isPositive
+                                            ? centerY - (bar.height / 2) - 1
+                                            : centerY + (bar.height / 2) + 1
+                                    )
+                                    .help("Ply \(bar.ply)  \(bar.scoreLabel)")
                                 }
                             }
-                            .stroke(Theme.accent.opacity(0.75), lineWidth: 2)
-
-                            ForEach(plotPoints) { point in
-                                Button {
-                                    selectAnalysisNodeFromMoveList(point.nodeID)
-                                } label: {
-                                    Circle()
-                                        .fill(point.nodeID == state.currentAnalysisNodeID ? Theme.accent : Theme.textSecondary.opacity(0.75))
-                                        .frame(
-                                            width: point.nodeID == state.currentAnalysisNodeID ? 11 : 8,
-                                            height: point.nodeID == state.currentAnalysisNodeID ? 11 : 8
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                                .position(x: point.x, y: point.y)
-                                .help("Ply \(point.ply)  \(point.scoreLabel)")
-                            }
+                            .frame(width: canvasWidth, height: proxy.size.height)
                         }
                     }
                 }
@@ -858,13 +864,13 @@ struct GameDetailView: View {
                         .font(Typography.detailLabel)
                         .foregroundStyle(Theme.textSecondary)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 2)
                         .background(Theme.surface.opacity(0.92))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .padding(8)
                 }
             }
-            .frame(height: 126)
+            .frame(height: 48)
 
             if state.analysisPathGraphIsTruncated {
                 Text("Graph limited to first 120 plies.")
@@ -877,6 +883,8 @@ struct GameDetailView: View {
                 Text(graphError)
                     .font(Typography.detailLabel)
                     .foregroundStyle(Theme.error)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
     }
@@ -889,67 +897,63 @@ struct GameDetailView: View {
 
     private var pathGraphEmptyMessage: String {
         if state.enginePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Select an engine to build the path graph."
+            return "Select engine to show path bars."
         }
         if state.analysisNodesByID.isEmpty {
-            return "No analysis path available yet."
+            return "No analysis path."
         }
-        return "Graph will appear as evaluations are computed."
+        return "Evaluating path..."
     }
 
-    private func pathGraphPlotPoints(in size: CGSize) -> [PathGraphPlotPoint] {
+    private func pathGraphCanvasWidth(availableWidth: CGFloat) -> CGFloat {
+        let horizontalPadding: CGFloat = 8
+        let slotWidth: CGFloat = 7
+        let required = horizontalPadding * 2 + CGFloat(max(state.analysisPathGraphPoints.count, 1)) * slotWidth
+        return max(availableWidth, required)
+    }
+
+    private func pathGraphBarEntries(in size: CGSize) -> [PathGraphBarEntry] {
         guard !state.analysisPathGraphPoints.isEmpty else { return [] }
 
         let values = state.analysisPathGraphPoints.compactMap(\.plotValue)
-        guard !values.isEmpty else { return [] }
+        let absScale = max(values.map(abs).max() ?? 100, 50)
+        let horizontalPadding: CGFloat = 8
+        let usableWidth = max(size.width - (horizontalPadding * 2), 1)
+        let count = max(state.analysisPathGraphPoints.count, 1)
+        let spacing = usableWidth / CGFloat(count)
+        let barWidth = min(8, max(2, spacing * 0.65))
+        let maxHalfHeight = max((size.height / 2) - 6, 3)
 
-        let padding: CGFloat = 8
-        let range = pathGraphValueRange(for: values)
-        let totalPly = max(state.analysisPathGraphPoints.count - 1, 1)
-        let usableWidth = max(size.width - (padding * 2), 1)
+        return state.analysisPathGraphPoints.enumerated().map { index, point in
+            let value = point.plotValue ?? 0
+            let normalized = min(abs(value) / absScale, 1)
+            let barHeight = max(2, CGFloat(normalized) * maxHalfHeight)
+            let x = horizontalPadding + (CGFloat(index) * spacing) + (spacing / 2)
 
-        return state.analysisPathGraphPoints.compactMap { point in
-            guard let plotValue = point.plotValue else { return nil }
-
-            let x = padding + (CGFloat(point.ply) / CGFloat(totalPly)) * usableWidth
-            let y = pathGraphY(
-                value: plotValue,
-                minValue: range.min,
-                maxValue: range.max,
-                height: size.height,
-                padding: padding
-            )
-
-            return PathGraphPlotPoint(
+            return PathGraphBarEntry(
                 nodeID: point.nodeID,
                 ply: point.ply,
                 x: x,
-                y: y,
+                height: barHeight,
+                width: barWidth,
+                isPositive: value >= 0,
+                isEvaluated: point.isEvaluated,
                 scoreLabel: point.scoreLabel
             )
         }
     }
 
-    private func pathGraphValueRange(for values: [Double]) -> (min: Double, max: Double) {
-        let minValue = min(values.min() ?? -100, -50)
-        let maxValue = max(values.max() ?? 100, 50)
-        if abs(maxValue - minValue) < 1 {
-            return (minValue - 1, maxValue + 1)
+    private func pathGraphBarColor(for bar: PathGraphBarEntry) -> Color {
+        if bar.nodeID == state.currentAnalysisNodeID {
+            return Theme.accent
         }
-        return (minValue, maxValue)
-    }
-
-    private func pathGraphY(
-        value: Double,
-        minValue: Double,
-        maxValue: Double,
-        height: CGFloat,
-        padding: CGFloat
-    ) -> CGFloat {
-        let clampedHeight = max(height - (padding * 2), 1)
-        let range = max(maxValue - minValue, 1)
-        let normalized = (value - minValue) / range
-        return padding + (1 - CGFloat(normalized)) * clampedHeight
+        if !bar.isEvaluated {
+            return Theme.textSecondary.opacity(0.25)
+        }
+        if bar.isPositive {
+            return Color(red: 0.18, green: 0.60, blue: 0.29).opacity(0.9)
+        }
+        return Color(red: 0.80, green: 0.20, blue: 0.20).opacity(0.9)
     }
 
     private var engineLinesPanel: some View {

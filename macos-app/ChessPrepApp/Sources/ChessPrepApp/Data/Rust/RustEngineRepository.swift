@@ -248,22 +248,22 @@ private final class RustEngineSession {
         var lines: [EngineLine] = []
 
         while let line = try stdoutReader.readLine(timeoutSeconds: 10) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
+            let rawLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            if rawLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 continue
             }
 
-            if trimmed.hasPrefix("ok-multipv\t") {
-                summary = try parseMultipvSummary(trimmed)
+            if rawLine.hasPrefix("ok-multipv\t") {
+                summary = try parseMultipvSummary(rawLine)
                 continue
             }
 
-            if trimmed.hasPrefix("line\t") {
-                lines.append(try parseMultipvLine(trimmed))
+            if rawLine.hasPrefix("line\t") {
+                lines.append(try parseMultipvLine(rawLine))
                 continue
             }
 
-            if trimmed == "done" {
+            if rawLine == "done" {
                 guard let summary else {
                     throw RepositoryError.failure("Engine returned malformed MultiPV output.")
                 }
@@ -283,13 +283,13 @@ private final class RustEngineSession {
             }
 
             // Backward compatibility if the existing binary still speaks the old protocol.
-            if trimmed.hasPrefix("ok\t") {
-                let legacy = try parseLegacyAnalysis(trimmed)
+            if rawLine.hasPrefix("ok\t") {
+                let legacy = try parseLegacyAnalysis(rawLine)
                 return normalizeEngineAnalysis(legacy, lines: legacy.lines, factor: perspectiveFactor)
             }
 
-            if trimmed.hasPrefix("err\t") {
-                throw RepositoryError.failure(String(trimmed.dropFirst(4)))
+            if rawLine.hasPrefix("err\t") {
+                throw RepositoryError.failure(String(rawLine.dropFirst(4)))
             }
         }
 
@@ -530,8 +530,8 @@ struct RustEngineRepository: EngineRepository {
         let rows = output
             .split(whereSeparator: \.isNewline)
             .map(String.init)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r")) }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
         guard !rows.isEmpty else {
             throw RepositoryError.failure("Engine did not return analysis output.")
