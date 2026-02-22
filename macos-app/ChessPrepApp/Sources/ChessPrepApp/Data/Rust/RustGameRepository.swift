@@ -62,6 +62,9 @@ struct RustGameRepository: GameRepository {
             do {
                 output = try RustBridge.runProcess(executableURL: binaryURL, arguments: args, workingDirectory: repoRoot)
             } catch {
+                guard RustBridge.canBuildBinary(repoRoot: repoRoot) else {
+                    throw error
+                }
                 // If binary is stale, rebuild and retry once.
                 try RustBridge.buildBinary(repoRoot: repoRoot)
                 output = try RustBridge.runProcess(executableURL: binaryURL, arguments: args, workingDirectory: repoRoot)

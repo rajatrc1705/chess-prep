@@ -64,6 +64,9 @@ final class AppState: ObservableObject {
     @Published var isAnalyzingEngine = false
     @Published var engineAnalysis: EngineAnalysis?
     @Published var engineError: String?
+    @Published var telemetryEnabled = false
+    @Published var telemetryInstallID = ""
+    @Published var telemetryEventsLogPath = ""
 
     private let gameRepository: any GameRepository
     private let importRepository: any ImportRepository
@@ -71,6 +74,7 @@ final class AppState: ObservableObject {
     private let engineRepository: any EngineRepository
     private let analysisRepository: any AnalysisRepository
     private let workspaceStore: WorkspaceStore
+    private let telemetryService: TelemetryService
     private var replayAutoPlayTask: Task<Void, Never>?
     private var autoAnalyzeTask: Task<Void, Never>?
     private var analysisPathGraphTask: Task<Void, Never>?
@@ -124,7 +128,8 @@ final class AppState: ObservableObject {
         replayRepository: any ReplayRepository = RustReplayRepository(),
         engineRepository: any EngineRepository = RustEngineRepository(),
         analysisRepository: any AnalysisRepository = RustAnalysisRepository(),
-        workspaceStore: WorkspaceStore = WorkspaceStore()
+        workspaceStore: WorkspaceStore = WorkspaceStore(),
+        telemetryService: TelemetryService = .shared
     ) {
         self.gameRepository = gameRepository
         self.importRepository = importRepository
@@ -132,7 +137,14 @@ final class AppState: ObservableObject {
         self.engineRepository = engineRepository
         self.analysisRepository = analysisRepository
         self.workspaceStore = workspaceStore
+        self.telemetryService = telemetryService
+        self.telemetryEnabled = telemetryService.isEnabled
+        self.telemetryInstallID = telemetryService.installID
+        self.telemetryEventsLogPath = telemetryService.eventsLogPath
         loadWorkspaceDatabases()
+        if let bundledEnginePath = RustBridge.bundledEnginePath() {
+            enginePath = bundledEnginePath
+        }
     }
 
     var selectedGame: GameSummary? {
@@ -206,6 +218,15 @@ final class AppState: ObservableObject {
         currentAnalysisNode?.fen
     }
 
+    func setTelemetryEnabled(_ enabled: Bool) {
+        telemetryEnabled = enabled
+        telemetryService.setEnabled(enabled)
+        telemetryTrack(
+            "telemetry_preference_updated",
+            properties: ["enabled": enabled ? "true" : "false"]
+        )
+    }
+
     func loadGames() async {
         isLoadingGames = true
         libraryError = nil
@@ -218,6 +239,13 @@ final class AppState: ObservableObject {
         do {
             let fetched = try await gameRepository.fetchGames(databases: workspaceDatabases, filter: filter)
             games = fetched
+            telemetryTrack(
+                "library_search_completed",
+                properties: [
+                    "result_count": String(fetched.count),
+                    "active_db_count": String(activeDatabaseCount),
+                ]
+            )
 
             if let selectedGameID, !games.contains(where: { $0.id == selectedGameID }) {
                 self.selectedGameID = nil
@@ -229,6 +257,10 @@ final class AppState: ObservableObject {
             selectedGameID = nil
             libraryPath = []
             clearReplayState()
+            telemetryTrack(
+                "library_search_failed",
+                properties: ["error": telemetryErrorString(error)]
+            )
         }
     }
 
@@ -251,14 +283,24 @@ final class AppState: ObservableObject {
         let pgnPaths = resolvedPgnPaths()
         guard !pgnPaths.isEmpty else {
             importState = .failure("At least one PGN file path is required.")
+            telemetryTrack("import_rejected", properties: ["reason": "missing_pgn_paths"])
             return
         }
 
         refreshDatabaseAvailability()
         guard let target = selectedImportDatabase else {
             importState = .failure("Select an import target database.")
+            telemetryTrack("import_rejected", properties: ["reason": "missing_target_database"])
             return
         }
+
+        telemetryTrack(
+            "import_started",
+            properties: [
+                "file_count": String(pgnPaths.count),
+                "target_database": target.label,
+            ]
+        )
 
         let startedAt = Date()
         var total = 0
@@ -305,6 +347,16 @@ final class AppState: ObservableObject {
                     durationMs: durationMs
                 )
             )
+            telemetryTrack(
+                "import_completed",
+                properties: [
+                    "total": String(total),
+                    "inserted": String(inserted),
+                    "skipped": String(skipped),
+                    "errors": String(errors),
+                    "duration_ms": String(durationMs),
+                ]
+            )
 
             refreshDatabaseAvailability()
             if selectedSection == .library {
@@ -312,6 +364,10 @@ final class AppState: ObservableObject {
             }
         } catch {
             importState = .failure(error.localizedDescription)
+            telemetryTrack(
+                "import_failed",
+                properties: ["error": telemetryErrorString(error)]
+            )
         }
     }
 
@@ -328,6 +384,10 @@ final class AppState: ObservableObject {
 
     func openGameExplorer(locator: GameLocator) {
         selectGame(locator: locator)
+        telemetryTrack(
+            "game_explorer_opened",
+            properties: ["game_id": String(locator.databaseID)]
+        )
         let route = LibraryRoute.gameExplorer(locator)
         if libraryPath.last != route {
             libraryPath.append(route)
@@ -427,21 +487,32 @@ final class AppState: ObservableObject {
         guard let fenToAnalyze = currentAnalysisFen ?? currentFen else {
             engineError = "No position selected."
             engineAnalysis = nil
+            telemetryTrack("engine_analysis_rejected", properties: ["reason": "missing_fen"])
             return
         }
         let normalizedEnginePath = enginePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedEnginePath.isEmpty else {
             engineError = "Select an engine first."
             engineAnalysis = nil
+            telemetryTrack("engine_analysis_rejected", properties: ["reason": "missing_engine_path"])
             return
         }
 
         guard let request = engineRequestSignature(for: fenToAnalyze) else {
             engineError = "No position selected."
             engineAnalysis = nil
+            telemetryTrack("engine_analysis_rejected", properties: ["reason": "invalid_request"])
             return
         }
 
+        telemetryTrack(
+            "engine_analysis_requested",
+            properties: [
+                "depth": String(request.depth),
+                "multipv": String(request.multipv),
+                "mode": "manual",
+            ]
+        )
         await analyzeEngine(request: request, force: true)
     }
 
@@ -513,9 +584,24 @@ final class AppState: ObservableObject {
             )
             engineAnalysis = analysis
             lastEngineRequest = request
+            telemetryTrack(
+                "engine_analysis_completed",
+                properties: [
+                    "depth": String(request.depth),
+                    "multipv": String(request.multipv),
+                    "mode": force ? "manual" : "auto",
+                ]
+            )
         } catch {
             engineAnalysis = nil
             engineError = error.localizedDescription
+            telemetryTrack(
+                "engine_analysis_failed",
+                properties: [
+                    "mode": force ? "manual" : "auto",
+                    "error": telemetryErrorString(error),
+                ]
+            )
         }
     }
 
@@ -685,11 +771,13 @@ final class AppState: ObservableObject {
         let normalizedUci = uci.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedUci.isEmpty else {
             analysisError = "UCI move is required."
+            telemetryTrack("analysis_move_rejected", properties: ["reason": "missing_uci"])
             return
         }
         guard let currentNodeID = currentAnalysisNodeID,
               let currentNode = analysisNodesByID[currentNodeID] else {
             analysisError = "No active analysis node."
+            telemetryTrack("analysis_move_rejected", properties: ["reason": "missing_current_node"])
             return
         }
 
@@ -701,6 +789,7 @@ final class AppState: ObservableObject {
                 currentAnalysisNodeID = existingChildID
                 analysisError = nil
                 clearEngineOutput()
+                telemetryTrack("analysis_move_selected_existing", properties: ["uci": normalizedUci.lowercased()])
                 return
             }
 
@@ -722,8 +811,16 @@ final class AppState: ObservableObject {
             analysisError = nil
             markAnalysisWorkspaceDirty()
             clearEngineOutput()
+            telemetryTrack("analysis_move_added", properties: ["uci": applied.uci.lowercased()])
         } catch {
             analysisError = error.localizedDescription
+            telemetryTrack(
+                "analysis_move_failed",
+                properties: [
+                    "uci": normalizedUci.lowercased(),
+                    "error": telemetryErrorString(error),
+                ]
+            )
         }
     }
 
@@ -870,16 +967,19 @@ final class AppState: ObservableObject {
     func saveCurrentAnalysisWorkspace() async {
         guard let game = selectedGame else {
             analysisWorkspaceError = "Select a game first."
+            telemetryTrack("analysis_workspace_save_rejected", properties: ["reason": "missing_game"])
             return
         }
         guard let rootNodeID = analysisRootNodeID else {
             analysisWorkspaceError = "No analysis tree to save."
+            telemetryTrack("analysis_workspace_save_rejected", properties: ["reason": "missing_tree"])
             return
         }
 
         let nodes = buildAnalysisWorkspaceNodeRecords(rootNodeID: rootNodeID)
         guard !nodes.isEmpty else {
             analysisWorkspaceError = "No analysis nodes available to save."
+            telemetryTrack("analysis_workspace_save_rejected", properties: ["reason": "empty_nodes"])
             return
         }
 
@@ -909,18 +1009,31 @@ final class AppState: ObservableObject {
             lastSavedAnalysisWorkspaceName = workspaceName
             analysisWorkspaceIsDirty = false
             analysisWorkspaceStatus = "Saved \"\(workspaceName)\"."
+            telemetryTrack(
+                "analysis_workspace_saved",
+                properties: [
+                    "workspace_id": String(savedWorkspaceID),
+                    "node_count": String(nodes.count),
+                ]
+            )
         } catch {
             analysisWorkspaceError = error.localizedDescription
+            telemetryTrack(
+                "analysis_workspace_save_failed",
+                properties: ["error": telemetryErrorString(error)]
+            )
         }
     }
 
     func loadSelectedAnalysisWorkspace() async {
         guard let selectedWorkspaceID = selectedAnalysisWorkspaceID else {
             analysisWorkspaceError = "Select a saved analysis first."
+            telemetryTrack("analysis_workspace_load_rejected", properties: ["reason": "missing_workspace_id"])
             return
         }
         guard let game = selectedGame else {
             analysisWorkspaceError = "Select a game first."
+            telemetryTrack("analysis_workspace_load_rejected", properties: ["reason": "missing_game"])
             return
         }
 
@@ -945,19 +1058,29 @@ final class AppState: ObservableObject {
             loadedAnalysisWorkspaceName = loaded.workspace.name
             analysisWorkspaceIsDirty = false
             analysisWorkspaceStatus = "Loaded \"\(loaded.workspace.name)\"."
+            telemetryTrack(
+                "analysis_workspace_loaded",
+                properties: ["workspace_id": String(loaded.workspace.id)]
+            )
         } catch {
             analysisWorkspaceError = error.localizedDescription
+            telemetryTrack(
+                "analysis_workspace_load_failed",
+                properties: ["error": telemetryErrorString(error)]
+            )
         }
     }
 
     func renameSelectedAnalysisWorkspace() async {
         guard let workspaceID = selectedAnalysisWorkspaceID else {
             analysisWorkspaceError = "Select a saved analysis first."
+            telemetryTrack("analysis_workspace_rename_rejected", properties: ["reason": "missing_workspace_id"])
             return
         }
         let trimmedName = analysisWorkspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             analysisWorkspaceError = "Workspace name is required."
+            telemetryTrack("analysis_workspace_rename_rejected", properties: ["reason": "empty_name"])
             return
         }
 
@@ -979,14 +1102,23 @@ final class AppState: ObservableObject {
             }
             analysisWorkspaceName = trimmedName
             analysisWorkspaceStatus = "Renamed workspace to \"\(trimmedName)\"."
+            telemetryTrack(
+                "analysis_workspace_renamed",
+                properties: ["workspace_id": String(workspaceID)]
+            )
         } catch {
             analysisWorkspaceError = error.localizedDescription
+            telemetryTrack(
+                "analysis_workspace_rename_failed",
+                properties: ["error": telemetryErrorString(error)]
+            )
         }
     }
 
     func deleteSelectedAnalysisWorkspace() async {
         guard let workspaceID = selectedAnalysisWorkspaceID else {
             analysisWorkspaceError = "Select a saved analysis first."
+            telemetryTrack("analysis_workspace_delete_rejected", properties: ["reason": "missing_workspace_id"])
             return
         }
 
@@ -1013,8 +1145,16 @@ final class AppState: ObservableObject {
 
             await refreshAnalysisWorkspaces()
             analysisWorkspaceStatus = "Deleted \"\(deletedName)\"."
+            telemetryTrack(
+                "analysis_workspace_deleted",
+                properties: ["workspace_id": String(workspaceID)]
+            )
         } catch {
             analysisWorkspaceError = error.localizedDescription
+            telemetryTrack(
+                "analysis_workspace_delete_failed",
+                properties: ["error": telemetryErrorString(error)]
+            )
         }
     }
 
@@ -1399,6 +1539,13 @@ final class AppState: ObservableObject {
             rebuildAnalysisTreeFromReplay()
             await refreshAnalysisWorkspaces()
             clearEngineOutput()
+            telemetryTrack(
+                "game_replay_loaded",
+                properties: [
+                    "game_id": String(game.databaseID),
+                    "ply_count": String(max(replay.fens.count - 1, 0)),
+                ]
+            )
         } catch {
             stopReplayAutoPlay()
             replayFens = []
@@ -1414,6 +1561,13 @@ final class AppState: ObservableObject {
                 replayError = message
             }
             clearEngineOutput()
+            telemetryTrack(
+                "game_replay_failed",
+                properties: [
+                    "game_id": String(game.databaseID),
+                    "error": telemetryErrorString(error),
+                ]
+            )
         }
     }
 
@@ -1525,19 +1679,7 @@ final class AppState: ObservableObject {
     private func loadWorkspaceDatabases() {
         let records = workspaceStore.load()
         if records.isEmpty {
-            let now = Date()
-            let defaultPath = RustBridge.expandTilde("~/Documents/chess-prep.sqlite")
-            workspaceDatabases = [
-                WorkspaceDatabase(
-                    id: UUID(),
-                    label: "Main DB",
-                    path: defaultPath,
-                    isActive: true,
-                    isAvailable: FileManager.default.fileExists(atPath: defaultPath),
-                    createdAt: now,
-                    updatedAt: now
-                ),
-            ]
+            workspaceDatabases = [makeDefaultWorkspaceDatabase()]
             selectedImportDatabaseID = workspaceDatabases.first?.id
             saveWorkspaceDatabases()
             return
@@ -1554,7 +1696,19 @@ final class AppState: ObservableObject {
                 updatedAt: record.updatedAt
             )
         }
-        selectedImportDatabaseID = workspaceDatabases.first?.id
+
+        if !workspaceDatabases.contains(where: { normalizePath($0.path) == normalizePath(defaultWorkspaceDatabasePath()) }) {
+            workspaceDatabases.append(makeDefaultWorkspaceDatabase())
+        }
+
+        if !workspaceDatabases.contains(where: \.isActive),
+           let firstID = workspaceDatabases.first?.id,
+           let firstIndex = workspaceDatabases.firstIndex(where: { $0.id == firstID }) {
+            workspaceDatabases[firstIndex].isActive = true
+        }
+
+        selectedImportDatabaseID = workspaceDatabases.first(where: \.isActive)?.id ?? workspaceDatabases.first?.id
+        saveWorkspaceDatabases()
     }
 
     private func saveWorkspaceDatabases() {
@@ -1575,6 +1729,52 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func makeDefaultWorkspaceDatabase() -> WorkspaceDatabase {
+        let now = Date()
+        let path = defaultWorkspaceDatabasePath()
+        let isAvailable = ensureWorkspaceDatabaseInitialized(path: path)
+        return WorkspaceDatabase(
+            id: UUID(),
+            label: "Main DB",
+            path: path,
+            isActive: true,
+            isAvailable: isAvailable,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func defaultWorkspaceDatabasePath() -> String {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ChessPrepApp", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        } catch {
+            workspaceError = error.localizedDescription
+        }
+        return base.appendingPathComponent("main.sqlite").path
+    }
+
+    private func ensureWorkspaceDatabaseInitialized(path: String) -> Bool {
+        let normalizedPath = normalizePath(path)
+        guard !normalizedPath.isEmpty else { return false }
+
+        do {
+            let parentDirectory = URL(fileURLWithPath: normalizedPath).deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: parentDirectory, withIntermediateDirectories: true)
+            let runtime = try RustBridge.runtimeContext()
+            try RustBridge.ensureDbExists(
+                binaryURL: runtime.binaryURL,
+                dbPath: normalizedPath,
+                workingDirectory: runtime.workingDirectory
+            )
+        } catch {
+            workspaceError = error.localizedDescription
+        }
+
+        return FileManager.default.fileExists(atPath: normalizedPath)
+    }
+
     private func refreshDatabaseAvailability() {
         workspaceDatabases = workspaceDatabases.map { database in
             var updated = database
@@ -1587,6 +1787,16 @@ final class AppState: ObservableObject {
 
     private func normalizePath(_ path: String) -> String {
         RustBridge.expandTilde(path).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func telemetryTrack(_ event: String, properties: [String: String] = [:]) {
+        telemetryService.track(event, properties: properties)
+    }
+
+    private func telemetryErrorString(_ error: Error) -> String {
+        let value = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count > 160 else { return value }
+        return "\(value.prefix(160))..."
     }
 
     deinit {

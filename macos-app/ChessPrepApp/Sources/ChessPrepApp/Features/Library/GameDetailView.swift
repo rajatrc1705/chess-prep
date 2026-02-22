@@ -636,13 +636,15 @@ struct GameDetailView: View {
     }
 
     private func detectedEnginePaths() -> [String] {
+        let bundledPath = RustBridge.bundledEnginePath()
         let commonPaths = [
+            bundledPath,
             "/opt/homebrew/bin/stockfish",
             "/opt/homebrew/opt/stockfish/bin/stockfish",
             "/usr/local/bin/stockfish",
             "/usr/bin/stockfish",
             "/Applications/Stockfish.app/Contents/MacOS/Stockfish",
-        ]
+        ].compactMap { $0 }
 
         let engineNames = ["stockfish", "lc0"]
         let pathEntries = ProcessInfo.processInfo.environment["PATH"]?
@@ -669,6 +671,10 @@ struct GameDetailView: View {
     }
 
     private func engineOptionLabel(for path: String) -> String {
+        if let bundledPath = RustBridge.bundledEnginePath(),
+           RustBridge.expandTilde(path) == RustBridge.expandTilde(bundledPath) {
+            return "stockfish  (Bundled)"
+        }
         let url = URL(fileURLWithPath: path)
         let fileName = url.lastPathComponent
         let parent = url.deletingLastPathComponent().lastPathComponent

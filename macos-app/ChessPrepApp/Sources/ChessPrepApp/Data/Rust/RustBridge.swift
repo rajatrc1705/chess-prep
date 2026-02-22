@@ -1,24 +1,124 @@
 import Foundation
 
+struct RustRuntimeContext {
+    let workingDirectory: URL
+    let binaryURL: URL
+    let canBuildFromSource: Bool
+}
+
 enum RustBridge {
-    static func repoRootURL() throws -> URL {
+    private static func sourceRepoRootURL() -> URL? {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<7 {
             url.deleteLastPathComponent()
         }
 
         guard FileManager.default.fileExists(atPath: url.appendingPathComponent("Cargo.toml").path) else {
-            throw RepositoryError.failure("Could not locate project root from Swift package path.")
+            return nil
         }
 
         return url
     }
 
+    private static func fallbackWorkingDirectoryURL() -> URL {
+        if let resourceURL = Bundle.main.resourceURL {
+            return resourceURL
+        }
+        if let moduleResourceURL = Bundle.module.resourceURL {
+            return moduleResourceURL
+        }
+        return FileManager.default.temporaryDirectory
+    }
+
+    static func repoRootURL() throws -> URL {
+        if let sourceRepoRoot = sourceRepoRootURL() {
+            return sourceRepoRoot
+        }
+        return fallbackWorkingDirectoryURL()
+    }
+
+    static func runtimeContext() throws -> RustRuntimeContext {
+        let workingDirectory = try repoRootURL()
+        let binary = try ensureBinary(repoRoot: workingDirectory)
+        return RustRuntimeContext(
+            workingDirectory: workingDirectory,
+            binaryURL: binary,
+            canBuildFromSource: canBuildBinary(repoRoot: workingDirectory)
+        )
+    }
+
+    static func canBuildBinary(repoRoot: URL) -> Bool {
+        FileManager.default.fileExists(atPath: repoRoot.appendingPathComponent("Cargo.toml").path)
+    }
+
+    private static func bundledBackendBinaryURL() -> URL? {
+        let candidates: [URL?] = [
+            Bundle.main.resourceURL?.appendingPathComponent("Binaries/chess-prep-backend"),
+            Bundle.main.resourceURL?.appendingPathComponent("chess-prep-backend"),
+            Bundle.module.url(forResource: "chess-prep-backend", withExtension: nil),
+            Bundle.module.url(forResource: "chess-prep-backend", withExtension: nil, subdirectory: "Binaries"),
+        ]
+
+        for candidate in candidates.compactMap({ $0 }) {
+            guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+            ensureExecutablePermissions(url: candidate)
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    static func bundledEnginePath() -> String? {
+        let candidates: [URL?] = [
+            Bundle.main.resourceURL?.appendingPathComponent("Engines/stockfish"),
+            Bundle.main.resourceURL?.appendingPathComponent("stockfish"),
+            Bundle.module.url(forResource: "stockfish", withExtension: nil),
+            Bundle.module.url(forResource: "stockfish", withExtension: nil, subdirectory: "Engines"),
+        ]
+
+        for candidate in candidates.compactMap({ $0 }) {
+            guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+            ensureExecutablePermissions(url: candidate)
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate.path
+            }
+        }
+
+        return nil
+    }
+
+    private static func ensureExecutablePermissions(url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        if FileManager.default.isExecutableFile(atPath: url.path) {
+            return
+        }
+
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        } catch {
+            // Best effort only; caller validates executability.
+        }
+    }
+
     static func binaryURL(repoRoot: URL) -> URL {
-        repoRoot.appendingPathComponent("target/debug/chess-prep")
+        if let bundledBackend = bundledBackendBinaryURL() {
+            return bundledBackend
+        }
+
+        let releaseBinary = repoRoot.appendingPathComponent("target/release/chess-prep")
+        if FileManager.default.fileExists(atPath: releaseBinary.path) {
+            return releaseBinary
+        }
+
+        return repoRoot.appendingPathComponent("target/debug/chess-prep")
     }
 
     static func ensureBinary(repoRoot: URL) throws -> URL {
+        if let bundledBackend = bundledBackendBinaryURL() {
+            return bundledBackend
+        }
+
         let binary = binaryURL(repoRoot: repoRoot)
         if !FileManager.default.fileExists(atPath: binary.path) {
             try buildBinary(repoRoot: repoRoot)
@@ -27,6 +127,12 @@ enum RustBridge {
     }
 
     static func buildBinary(repoRoot: URL) throws {
+        guard canBuildBinary(repoRoot: repoRoot) else {
+            throw RepositoryError.failure(
+                "Rust backend binary is missing and local source build is unavailable."
+            )
+        }
+
         _ = try runProcess(
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: [
@@ -40,11 +146,15 @@ enum RustBridge {
     }
 
     static func ensureDbExists(binaryURL: URL, dbPath: String, repoRoot: URL) throws {
+        try ensureDbExists(binaryURL: binaryURL, dbPath: dbPath, workingDirectory: repoRoot)
+    }
+
+    static func ensureDbExists(binaryURL: URL, dbPath: String, workingDirectory: URL) throws {
         if !FileManager.default.fileExists(atPath: dbPath) {
             _ = try runProcess(
                 executableURL: binaryURL,
                 arguments: ["init", dbPath],
-                workingDirectory: repoRoot
+                workingDirectory: workingDirectory
             )
         }
     }

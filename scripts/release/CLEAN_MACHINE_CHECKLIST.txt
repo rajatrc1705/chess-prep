@@ -1,0 +1,42 @@
+ChessPrepApp Stage 2 RC - Clean Machine Checklist
+
+1) Artifact integrity
+- Verify SHA256 checksums from SHA256SUMS.txt.
+- Confirm notarization ticket exists (if notarization was enabled).
+
+2) Install validation (fresh macOS user or VM)
+- Download/open DMG.
+- Drag ChessPrepApp to /Applications.
+- Launch app from Finder (not from terminal).
+- Confirm app opens without quarantine/signature warnings.
+- Confirm no manual setup is required:
+  - Main DB exists automatically.
+  - Engine is selected automatically (bundled Stockfish).
+
+3) Core flow smoke
+- Verify default Main DB is pre-registered.
+- Import at least one PGN file.
+- Load library and open game explorer.
+- Confirm replay controls and board interactions work.
+- Confirm engine analysis works and path ebb/flow updates.
+
+4) Analysis workflow smoke
+- Create a variation via drag move.
+- Add quick NAG/comment.
+- Save analysis workspace.
+- Reload analysis workspace and verify same branch structure.
+
+5) Observability smoke
+- Enable "Share anonymous metrics" toggle in sidebar.
+- Perform import + search + analyze actions.
+- Confirm local telemetry file is populated:
+  ~/Library/Application Support/ChessPrepApp/telemetry/events.jsonl
+
+6) Exit/relaunch crash marker check
+- Quit app normally and relaunch.
+- Confirm no "previous_session_unclean_exit" event after clean quit.
+- Force close app once, relaunch, and verify event appears when telemetry is enabled.
+
+7) Release sign-off
+- Record tested macOS version(s), machine architecture, and tester initials.
+- Tag candidate build (for example: v0.2.0-rc1).

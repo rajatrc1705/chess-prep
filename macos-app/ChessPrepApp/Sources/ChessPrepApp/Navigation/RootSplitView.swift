@@ -173,6 +173,35 @@ struct RootSplitView: View {
                     .foregroundStyle(Theme.textOnBrown.opacity(0.85))
             }
 
+            Section {
+                Toggle(
+                    isOn: Binding(
+                        get: { state.telemetryEnabled },
+                        set: { state.setTelemetryEnabled($0) }
+                    )
+                ) {
+                    Text("Share anonymous metrics")
+                        .foregroundStyle(Theme.textOnBrown)
+                }
+                .toggleStyle(.switch)
+                .listRowBackground(Theme.sidebarBackground)
+
+                Text("Install ID: \(shortTelemetryInstallID)")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textOnBrown.opacity(0.75))
+                    .lineLimit(1)
+                    .listRowBackground(Theme.sidebarBackground)
+
+                Text(state.telemetryEnabled ? "Metrics file: \(state.telemetryEventsLogPath)" : "Metrics disabled")
+                    .font(Typography.detailLabel)
+                    .foregroundStyle(Theme.textOnBrown.opacity(0.75))
+                    .lineLimit(2)
+                    .listRowBackground(Theme.sidebarBackground)
+            } header: {
+                Text("Telemetry")
+                    .foregroundStyle(Theme.textOnBrown.opacity(0.85))
+            }
+
             if state.selectedSection == .library {
                 Section {
                     sidebarTextField(
@@ -334,6 +363,14 @@ struct RootSplitView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+    }
+
+    private var shortTelemetryInstallID: String {
+        let value = state.telemetryInstallID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count > 12 else { return value }
+        let prefix = value.prefix(6)
+        let suffix = value.suffix(4)
+        return "\(prefix)...\(suffix)"
     }
 
     @ViewBuilder

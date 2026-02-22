@@ -59,6 +59,9 @@ struct RustImportRepository: ImportRepository {
             output = result.output
             finalSummary = result.summary
         } catch {
+            guard RustBridge.canBuildBinary(repoRoot: repoRoot) else {
+                throw error
+            }
             // If binary is stale, rebuild and retry once.
             try RustBridge.buildBinary(repoRoot: repoRoot)
             let result = try runImportProcess(

@@ -454,6 +454,9 @@ struct RustEngineRepository: EngineRepository {
         do {
             binaryURL = try RustBridge.ensureBinary(repoRoot: repoRoot)
         } catch {
+            guard RustBridge.canBuildBinary(repoRoot: repoRoot) else {
+                throw error
+            }
             try RustBridge.buildBinary(repoRoot: repoRoot)
             binaryURL = try RustBridge.ensureBinary(repoRoot: repoRoot)
         }

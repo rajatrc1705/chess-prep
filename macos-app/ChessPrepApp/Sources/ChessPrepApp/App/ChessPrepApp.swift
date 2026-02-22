@@ -14,6 +14,10 @@ struct ChessPrepApp: App {
                 .tint(Theme.accent)
                 .onAppear {
                     configureAppAppearance()
+                    TelemetryService.shared.startSession()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    TelemetryService.shared.endSession()
                 }
         }
         .windowStyle(.titleBar)

@@ -371,6 +371,9 @@ struct RustAnalysisRepository: AnalysisRepository {
                 workingDirectory: repoRoot
             )
         } catch {
+            guard RustBridge.canBuildBinary(repoRoot: repoRoot) else {
+                throw error
+            }
             try RustBridge.buildBinary(repoRoot: repoRoot)
             return try RustBridge.runProcess(
                 executableURL: binaryURL,

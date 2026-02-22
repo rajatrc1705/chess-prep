@@ -19,7 +19,7 @@ struct ImportView: View {
                     Text("Import Games")
                         .font(Typography.sectionTitle)
 
-                    Text("Choose a target database, select PGN files, then run import. Add databases from the sidebar.")
+                    Text("Choose a target database, select PGN files, then run import. Main DB is created automatically; add more from the sidebar if needed.")
                         .font(Typography.body)
                         .foregroundStyle(Theme.textSecondary)
 

@@ -8,6 +8,15 @@
 .DS_Store
 .swiftpm/
 
+# Release/build artifacts
+release-artifacts/
+DerivedData/
+*.xcarchive
+*.dSYM/
+*.app
+*.dmg
+*.pkg
+
 # Documentation
 *.md
 docs/
