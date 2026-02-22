@@ -31,6 +31,12 @@ final class AppState: ObservableObject {
     @Published var isLoadingReplay = false
     @Published var replayError: String?
     @Published var isReplayAutoPlaying = false
+    @Published var analysisNodesByID: [UUID: AnalysisNode] = [:]
+    @Published var analysisNodeIDByPly: [UUID] = []
+    @Published var analysisRootNodeID: UUID?
+    @Published var currentAnalysisNodeID: UUID?
+    @Published var analysisMoveInput = ""
+    @Published var analysisError: String?
     @Published var enginePath = ""
     @Published var engineDepth = 18
     @Published var isAnalyzingEngine = false
@@ -41,6 +47,7 @@ final class AppState: ObservableObject {
     private let importRepository: any ImportRepository
     private let replayRepository: any ReplayRepository
     private let engineRepository: any EngineRepository
+    private let analysisRepository: any AnalysisRepository
     private let workspaceStore: WorkspaceStore
     private var replayAutoPlayTask: Task<Void, Never>?
 
@@ -49,12 +56,14 @@ final class AppState: ObservableObject {
         importRepository: any ImportRepository = RustImportRepository(),
         replayRepository: any ReplayRepository = RustReplayRepository(),
         engineRepository: any EngineRepository = RustEngineRepository(),
+        analysisRepository: any AnalysisRepository = RustAnalysisRepository(),
         workspaceStore: WorkspaceStore = WorkspaceStore()
     ) {
         self.gameRepository = gameRepository
         self.importRepository = importRepository
         self.replayRepository = replayRepository
         self.engineRepository = engineRepository
+        self.analysisRepository = analysisRepository
         self.workspaceStore = workspaceStore
         loadWorkspaceDatabases()
     }
@@ -86,11 +95,28 @@ final class AppState: ObservableObject {
     }
 
     var canStepBackward: Bool {
-        currentPly > 0
+        guard let currentAnalysisNodeID else {
+            return currentPly > 0
+        }
+
+        if let mainlinePly = analysisNodeIDByPly.firstIndex(of: currentAnalysisNodeID) {
+            return mainlinePly > 0
+        }
+
+        return analysisNodesByID[currentAnalysisNodeID]?.parentID != nil
     }
 
     var canStepForward: Bool {
-        currentPly + 1 < replayFens.count
+        guard let currentAnalysisNodeID else {
+            return currentPly + 1 < replayFens.count
+        }
+
+        if let mainlinePly = analysisNodeIDByPly.firstIndex(of: currentAnalysisNodeID) {
+            return analysisNodeIDByPly.indices.contains(mainlinePly + 1)
+        }
+
+        guard let node = analysisNodesByID[currentAnalysisNodeID] else { return false }
+        return !node.children.isEmpty
     }
 
     var maxPly: Int {
@@ -102,6 +128,15 @@ final class AppState: ObservableObject {
         let index = currentPly - 1
         guard replaySans.indices.contains(index) else { return nil }
         return replaySans[index]
+    }
+
+    var currentAnalysisNode: AnalysisNode? {
+        guard let currentAnalysisNodeID else { return nil }
+        return analysisNodesByID[currentAnalysisNodeID]
+    }
+
+    var currentAnalysisFen: String? {
+        currentAnalysisNode?.fen
     }
 
     func loadGames() async {
@@ -253,33 +288,55 @@ final class AppState: ObservableObject {
 
     func stepBackward() {
         stopReplayAutoPlay()
-        guard canStepBackward else { return }
-        currentPly -= 1
-        clearEngineOutput()
+        guard let currentAnalysisNodeID else {
+            guard canStepBackward else { return }
+            setReplayPly(currentPly - 1)
+            return
+        }
+
+        if let mainlinePly = analysisNodeIDByPly.firstIndex(of: currentAnalysisNodeID) {
+            guard mainlinePly > 0 else { return }
+            setReplayPly(mainlinePly - 1)
+            return
+        }
+
+        guard let parentID = analysisNodesByID[currentAnalysisNodeID]?.parentID else { return }
+        selectAnalysisStepNode(parentID)
     }
 
     func stepForward() {
         stopReplayAutoPlay()
-        guard canStepForward else { return }
-        currentPly += 1
-        clearEngineOutput()
+        guard let currentAnalysisNodeID else {
+            guard canStepForward else { return }
+            setReplayPly(currentPly + 1)
+            return
+        }
+
+        if let mainlinePly = analysisNodeIDByPly.firstIndex(of: currentAnalysisNodeID) {
+            let nextPly = mainlinePly + 1
+            guard analysisNodeIDByPly.indices.contains(nextPly) else { return }
+            setReplayPly(nextPly)
+            return
+        }
+
+        guard let nextID = analysisNodesByID[currentAnalysisNodeID]?.children.first else { return }
+        selectAnalysisStepNode(nextID)
     }
 
     func goToReplayStart() {
         stopReplayAutoPlay()
-        currentPly = 0
-        clearEngineOutput()
+        setReplayPly(0)
     }
 
     func goToReplayEnd() {
         stopReplayAutoPlay()
-        currentPly = maxPly
-        clearEngineOutput()
+        setReplayPly(maxPly)
     }
 
     func setReplayPly(_ ply: Int) {
         stopReplayAutoPlay()
         currentPly = min(max(ply, 0), maxPly)
+        syncAnalysisSelectionToCurrentPly(clearError: true)
         clearEngineOutput()
     }
 
@@ -292,15 +349,16 @@ final class AppState: ObservableObject {
     }
 
     func copyCurrentFenToPasteboard() {
-        guard let currentFen else { return }
+        guard let fen = currentAnalysisFen ?? currentFen else { return }
         #if canImport(AppKit)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(currentFen, forType: .string)
+        NSPasteboard.general.setString(fen, forType: .string)
         #endif
     }
 
     func analyzeCurrentPosition() async {
-        guard let fen = currentFen else {
+        let fenToAnalyze = currentAnalysisFen ?? currentFen
+        guard let fen = fenToAnalyze else {
             engineError = "No position selected."
             engineAnalysis = nil
             return
@@ -321,6 +379,205 @@ final class AppState: ObservableObject {
             engineAnalysis = nil
             engineError = error.localizedDescription
         }
+    }
+
+    func rebuildAnalysisTreeFromReplay() {
+        clearAnalysisState()
+
+        guard let rootFen = replayFens.first else {
+            return
+        }
+
+        let rootID = UUID()
+        let root = AnalysisNode(
+            id: rootID,
+            parentID: nil,
+            san: nil,
+            uci: nil,
+            fen: rootFen,
+            comment: "",
+            nags: [],
+            children: []
+        )
+        analysisNodesByID[rootID] = root
+        analysisNodeIDByPly.append(rootID)
+
+        var parentID = rootID
+        for index in replaySans.indices {
+            let nextFenIndex = index + 1
+            guard replayFens.indices.contains(nextFenIndex) else {
+                break
+            }
+
+            let nodeID = UUID()
+            let node = AnalysisNode(
+                id: nodeID,
+                parentID: parentID,
+                san: replaySans[index],
+                uci: replayUcis.indices.contains(index) ? replayUcis[index] : nil,
+                fen: replayFens[nextFenIndex],
+                comment: "",
+                nags: [],
+                children: []
+            )
+            analysisNodesByID[nodeID] = node
+            analysisNodeIDByPly.append(nodeID)
+            appendAnalysisChild(parentID: parentID, childID: nodeID)
+            parentID = nodeID
+        }
+
+        analysisRootNodeID = rootID
+        syncAnalysisSelectionToCurrentPly()
+    }
+
+    func selectAnalysisNode(id: UUID) {
+        guard analysisNodesByID[id] != nil else { return }
+        currentAnalysisNodeID = id
+        analysisError = nil
+        clearEngineOutput()
+    }
+
+    func applyAnalysisMoveFromInput() async {
+        let input = analysisMoveInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else {
+            analysisError = "UCI move is required."
+            return
+        }
+        await addAnalysisMove(uci: input)
+        if analysisError == nil {
+            analysisMoveInput = ""
+        }
+    }
+
+    func addAnalysisMove(uci: String) async {
+        let normalizedUci = uci.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedUci.isEmpty else {
+            analysisError = "UCI move is required."
+            return
+        }
+        guard let currentNodeID = currentAnalysisNodeID,
+              let currentNode = analysisNodesByID[currentNodeID] else {
+            analysisError = "No active analysis node."
+            return
+        }
+
+        do {
+            if let existingChildID = currentNode.children.first(where: { childID in
+                guard let childUci = analysisNodesByID[childID]?.uci else { return false }
+                return childUci.caseInsensitiveCompare(normalizedUci) == .orderedSame
+            }) {
+                currentAnalysisNodeID = existingChildID
+                analysisError = nil
+                clearEngineOutput()
+                return
+            }
+
+            let applied = try await analysisRepository.applyMove(fen: currentNode.fen, uci: normalizedUci)
+            let childID = UUID()
+            let child = AnalysisNode(
+                id: childID,
+                parentID: currentNodeID,
+                san: applied.san,
+                uci: applied.uci,
+                fen: applied.fen,
+                comment: "",
+                nags: [],
+                children: []
+            )
+            analysisNodesByID[childID] = child
+            appendAnalysisChild(parentID: currentNodeID, childID: childID)
+            currentAnalysisNodeID = childID
+            analysisError = nil
+            clearEngineOutput()
+        } catch {
+            analysisError = error.localizedDescription
+        }
+    }
+
+    func deleteAnalysisNode(id: UUID) {
+        guard analysisNodesByID[id] != nil else { return }
+        guard id != analysisRootNodeID else {
+            analysisError = "Cannot delete the analysis root."
+            return
+        }
+        guard !analysisNodeIDByPly.contains(id) else {
+            analysisError = "Replay mainline moves cannot be deleted."
+            return
+        }
+
+        let removedNodeIDs = collectAnalysisSubtreeIDs(startingAt: id)
+        guard !removedNodeIDs.isEmpty else { return }
+
+        let parentID = analysisNodesByID[id]?.parentID
+        for removedID in removedNodeIDs {
+            analysisNodesByID.removeValue(forKey: removedID)
+        }
+
+        if let parentID, var parent = analysisNodesByID[parentID] {
+            parent.children.removeAll { removedNodeIDs.contains($0) }
+            analysisNodesByID[parentID] = parent
+        }
+
+        if let currentID = currentAnalysisNodeID, removedNodeIDs.contains(currentID) {
+            if let parentID, analysisNodesByID[parentID] != nil {
+                currentAnalysisNodeID = parentID
+            } else {
+                currentAnalysisNodeID = analysisRootNodeID
+            }
+        }
+
+        analysisError = nil
+        clearEngineOutput()
+    }
+
+    func legalMoves(fen: String) async throws -> [String] {
+        try await analysisRepository.legalMoves(fen: fen)
+    }
+
+    func updateCurrentAnalysisComment(_ comment: String) {
+        guard let currentID = currentAnalysisNodeID else { return }
+        updateAnalysisComment(id: currentID, comment: comment)
+    }
+
+    func updateAnalysisComment(id: UUID, comment: String) {
+        guard var node = analysisNodesByID[id] else { return }
+        node.comment = comment
+        analysisNodesByID[id] = node
+    }
+
+    func toggleCurrentAnalysisNag(_ nag: String) {
+        guard let currentID = currentAnalysisNodeID else { return }
+        toggleAnalysisNag(id: currentID, nag: nag)
+    }
+
+    func toggleAnalysisNag(id: UUID, nag: String) {
+        guard var node = analysisNodesByID[id] else { return }
+        if let index = node.nags.firstIndex(of: nag) {
+            node.nags.remove(at: index)
+        } else {
+            node.nags.append(nag)
+        }
+        analysisNodesByID[id] = node
+    }
+
+    func applyAnalysisAnnotationSymbol(id: UUID, symbol: String) {
+        let principalSymbols: Set<String> = ["!!", "!", "!?", "?!", "?", "??"]
+        guard var node = analysisNodesByID[id] else { return }
+
+        if principalSymbols.contains(symbol) {
+            if node.nags.contains(symbol) {
+                node.nags.removeAll { $0 == symbol }
+            } else {
+                node.nags.removeAll { principalSymbols.contains($0) }
+                node.nags.append(symbol)
+            }
+        } else if let index = node.nags.firstIndex(of: symbol) {
+            node.nags.remove(at: index)
+        } else {
+            node.nags.append(symbol)
+        }
+
+        analysisNodesByID[id] = node
     }
 
     func registerDatabase(path: String, label: String? = nil) {
@@ -413,6 +670,7 @@ final class AppState: ObservableObject {
         currentPly = 0
         replayError = nil
         isLoadingReplay = false
+        clearAnalysisState()
         clearEngineOutput()
     }
 
@@ -436,6 +694,7 @@ final class AppState: ObservableObject {
             replaySans = replay.sans
             replayUcis = replay.ucis
             currentPly = 0
+            rebuildAnalysisTreeFromReplay()
             clearEngineOutput()
         } catch {
             stopReplayAutoPlay()
@@ -443,6 +702,7 @@ final class AppState: ObservableObject {
             replaySans = []
             replayUcis = []
             currentPly = 0
+            clearAnalysisState()
             let message = error.localizedDescription
             if message.contains("MissingMovetext") || message.contains("GameNotFound") {
                 replayError = nil
@@ -450,6 +710,68 @@ final class AppState: ObservableObject {
                 replayError = message
             }
             clearEngineOutput()
+        }
+    }
+
+    private func appendAnalysisChild(parentID: UUID, childID: UUID) {
+        guard var parent = analysisNodesByID[parentID] else { return }
+        parent.children.append(childID)
+        analysisNodesByID[parentID] = parent
+    }
+
+    private func collectAnalysisSubtreeIDs(startingAt rootID: UUID) -> Set<UUID> {
+        var visited = Set<UUID>()
+        var stack: [UUID] = [rootID]
+
+        while let nodeID = stack.popLast() {
+            guard !visited.contains(nodeID) else { continue }
+            visited.insert(nodeID)
+
+            guard let node = analysisNodesByID[nodeID] else { continue }
+            stack.append(contentsOf: node.children)
+        }
+
+        return visited
+    }
+
+    private func selectAnalysisStepNode(_ nodeID: UUID) {
+        if let mainlinePly = analysisNodeIDByPly.firstIndex(of: nodeID) {
+            setReplayPly(mainlinePly)
+            return
+        }
+
+        guard analysisNodesByID[nodeID] != nil else { return }
+        currentAnalysisNodeID = nodeID
+        analysisError = nil
+        clearEngineOutput()
+    }
+
+    private func clearAnalysisState() {
+        analysisNodesByID = [:]
+        analysisNodeIDByPly = []
+        analysisRootNodeID = nil
+        currentAnalysisNodeID = nil
+        analysisMoveInput = ""
+        analysisError = nil
+    }
+
+    private func syncAnalysisSelectionToCurrentPly(clearError: Bool = false) {
+        guard !analysisNodeIDByPly.isEmpty else {
+            currentAnalysisNodeID = analysisRootNodeID
+            if clearError {
+                analysisError = nil
+            }
+            return
+        }
+
+        if analysisNodeIDByPly.indices.contains(currentPly) {
+            currentAnalysisNodeID = analysisNodeIDByPly[currentPly]
+        } else {
+            currentAnalysisNodeID = analysisRootNodeID
+        }
+
+        if clearError {
+            analysisError = nil
         }
     }
 
@@ -469,6 +791,8 @@ final class AppState: ObservableObject {
 
                 if self.currentPly < self.maxPly {
                     self.currentPly += 1
+                    self.syncAnalysisSelectionToCurrentPly(clearError: true)
+                    self.clearEngineOutput()
                 } else {
                     self.stopReplayAutoPlay()
                     return

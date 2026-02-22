@@ -1,3 +1,17 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedMove {
+    pub san: String,
+    pub uci: String,
+    pub fen: String,
+}
+
+#[derive(Debug)]
+pub enum AnalysisError {
+    InvalidFen(String),
+    InvalidUci(String),
+    IllegalMove(String),
+}
+
 #[derive(Debug)]
 pub enum ImportError {
     Io(std::io::Error),

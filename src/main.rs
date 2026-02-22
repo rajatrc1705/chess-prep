@@ -1,7 +1,9 @@
 use chess_prep::{
-    GameFilter, GameResultFilter, Pagination, analyze_position, count_games, import_pgn_file,
-    import_pgn_file_with_progress, init_db, replay_game, replay_game_fens, search_games,
+    GameFilter, GameResultFilter, Pagination, analyze_position, apply_uci_to_fen, count_games,
+    import_pgn_file, import_pgn_file_with_progress, init_db, legal_uci_moves_for_fen, replay_game,
+    replay_game_fens, search_games,
 };
+
 use std::env;
 
 fn print_usage(program: &str) {
@@ -17,6 +19,8 @@ fn print_usage(program: &str) {
     eprintln!("       {program} replay <db_path> <game_id>");
     eprintln!("       {program} replay-meta <db_path> <game_id>");
     eprintln!("       {program} analyze <engine_path> <fen> [--depth <n>]");
+    eprintln!("       {program} apply-uci <fen> <uci>");
+    eprintln!("       {program} legal-uci <fen>");
 }
 
 fn parse_result(value: &str) -> Result<GameResultFilter, String> {
@@ -232,6 +236,26 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        [_, command, fen, uci] if command == "apply-uci" => {
+            let applied = apply_uci_to_fen(fen, uci)
+                .map_err(|err| format!("failed to apply uci '{uci}' on fen '{fen}': {err:?}"))?;
+            println!(
+                "{}\t{}\t{}",
+                tsv_escape(Some(&applied.san)),
+                tsv_escape(Some(&applied.uci)),
+                tsv_escape(Some(&applied.fen))
+            );
+            Ok(())
+        }
+        [_, command, fen] if command == "legal-uci" => {
+            let legal_moves = legal_uci_moves_for_fen(fen)
+                .map_err(|err| format!("failed to list legal moves for fen '{fen}': {err:?}"))?;
+            for uci in legal_moves {
+                println!("{uci}");
+            }
+            Ok(())
+        }
+
         [_, command, engine_path, fen, rest @ ..] if command == "analyze" => {
             let depth = parse_analyze_options(rest)?;
             let analysis = analyze_position(engine_path, fen, depth).map_err(|err| {

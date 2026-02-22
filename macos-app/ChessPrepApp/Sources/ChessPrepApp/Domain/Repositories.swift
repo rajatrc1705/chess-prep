@@ -33,3 +33,8 @@ protocol ReplayRepository: Sendable {
 protocol EngineRepository: Sendable {
     func analyzePosition(enginePath: String, fen: String, depth: Int) async throws -> EngineAnalysis
 }
+
+protocol AnalysisRepository: Sendable {
+    func applyMove(fen: String, uci: String) async throws -> AnalysisAppliedMove
+    func legalMoves(fen: String) async throws -> [String]
+}

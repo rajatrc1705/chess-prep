@@ -155,6 +155,23 @@ struct ReplayData: Equatable, Sendable {
     let ucis: [String]
 }
 
+struct AnalysisAppliedMove: Equatable, Sendable {
+    let san: String
+    let uci: String
+    let fen: String
+}
+
+struct AnalysisNode: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let parentID: UUID?
+    var san: String?
+    var uci: String?
+    var fen: String
+    var comment: String
+    var nags: [String]
+    var children: [UUID]
+}
+
 struct EngineAnalysis: Equatable, Sendable {
     let depth: Int
     let scoreCp: Int?

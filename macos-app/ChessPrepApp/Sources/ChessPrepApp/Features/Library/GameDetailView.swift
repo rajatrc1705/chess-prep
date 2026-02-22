@@ -7,10 +7,36 @@ struct GameDetailView: View {
     @ObservedObject var state: AppState
     let locator: GameLocator?
     @State private var whiteAtBottom = true
+    @State private var collapsedAnalysisNodeIDs: Set<UUID> = []
+    @State private var legalMoveLookupBySource: [String: [String: String]] = [:]
+    @State private var editingAnnotationNodeID: UUID?
+    @FocusState private var inlineAnnotationFocusID: UUID?
     @FocusState private var replayFocused: Bool
 
     private let boardCellSize: CGFloat = 60
     private let explorerColumnMaxWidth: CGFloat = 1180
+    private let annotationSymbolOptions: [String] = [
+        "!!", "!", "!?", "?!",
+        "?", "??", "x", "+-",
+        "+/-", "-/+", "=", "inf",
+        "-+", "=/inf",
+    ]
+
+    private struct AnalysisDisplayLine: Identifiable {
+        let id: UUID
+        let rootNodeID: UUID
+        let nodeIDs: [UUID]
+        let depth: Int
+        let isVariation: Bool
+        let hasNestedVariations: Bool
+    }
+
+    private struct LineToken {
+        let nodeID: UUID
+        let moveCore: String
+        let nags: String
+        let annotation: String
+    }
 
     init(state: AppState, locator: GameLocator? = nil) {
         self.state = state
@@ -60,6 +86,18 @@ struct GameDetailView: View {
         }
         .onChange(of: state.selectedGameID) { _, _ in
             replayFocused = true
+            collapsedAnalysisNodeIDs = []
+            legalMoveLookupBySource = [:]
+            editingAnnotationNodeID = nil
+            inlineAnnotationFocusID = nil
+        }
+        .onChange(of: state.currentAnalysisNodeID) { _, _ in
+            expandSelectedAnalysisPath()
+        }
+        .onChange(of: inlineAnnotationFocusID) { _, nextFocus in
+            if nextFocus == nil {
+                editingAnnotationNodeID = nil
+            }
         }
         .onMoveCommand(perform: handleMoveCommand)
     }
@@ -127,18 +165,29 @@ struct GameDetailView: View {
                 Text(replayError)
                     .font(Typography.body)
                     .foregroundStyle(Theme.error)
-            } else if let currentFen = state.currentFen {
+            } else if let replayFen = state.currentFen {
+                let boardFen = state.currentAnalysisFen ?? replayFen
                 HStack(alignment: .top, spacing: 18) {
                     ChessBoardView(
-                        fen: currentFen,
+                        fen: boardFen,
                         whiteAtBottom: whiteAtBottom,
                         highlightedSquares: highlightedSquares(),
                         lastMove: lastMoveSquares(),
-                        cellSize: boardCellSize
+                        legalMovesByFrom: legalMoveLookupBySource,
+                        moveAnnotationBadge: activeMoveAnnotationBadge(),
+                        cellSize: boardCellSize,
+                        onMoveAttempt: { uci in
+                            Task {
+                                await state.addAnalysisMove(uci: uci)
+                            }
+                        }
                     )
                     .frame(width: boardPixelSize, height: boardPixelSize, alignment: .topLeading)
+                    .task(id: boardFen) {
+                        await refreshLegalMoveLookup(for: boardFen)
+                    }
 
-                    moveListView
+                    analysisMoveListView
                         .frame(minWidth: 380, maxWidth: .infinity, minHeight: boardPixelSize, maxHeight: boardPixelSize, alignment: .topLeading)
                 }
 
@@ -183,12 +232,18 @@ struct GameDetailView: View {
                 }
 
                 HStack(spacing: 8) {
-                    statusChip(title: "Turn", value: activeColor(from: currentFen))
-                    statusChip(title: "Move", value: fullMoveNumber(from: currentFen))
-                    statusChip(title: "", value: state.currentMoveSAN ?? "-")
+                    statusChip(title: "Turn", value: activeColor(from: boardFen))
+                    statusChip(title: "Move", value: fullMoveNumber(from: boardFen))
+                    statusChip(title: "Node", value: state.currentAnalysisNode?.san ?? "Start")
                 }
 
-                enginePanel(currentFen: currentFen)
+                if !isCurrentAnalysisOnReplayMainline {
+                    Text("Viewing analysis variation from replay ply \(state.currentPly).")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                enginePanel(currentFen: boardFen)
             } else {
                 Text("No replay data available for this game yet.")
                     .font(Typography.body)
@@ -263,21 +318,36 @@ struct GameDetailView: View {
         .padding(.top, 6)
     }
 
-    private var moveListView: some View {
+    private var analysisMoveListView: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 7) {
-                ForEach(0..<((state.replaySans.count + 1) / 2), id: \.self) { turn in
-                    let whiteIndex = turn * 2
-                    let blackIndex = whiteIndex + 1
+            LazyVStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("Move Tree")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                    Spacer()
+                    Button("Collapse All") {
+                        collapseAllVariations()
+                    }
+                    .buttonStyle(.bordered)
+                    .font(Typography.detailLabel)
 
-                    HStack(spacing: 10) {
-                        Text("\(turn + 1).")
-                            .font(Typography.dataMono)
-                            .foregroundStyle(Theme.textSecondary)
-                            .frame(width: 36, alignment: .trailing)
+                    Button("Expand All") {
+                        collapsedAnalysisNodeIDs.removeAll()
+                    }
+                    .buttonStyle(.bordered)
+                    .font(Typography.detailLabel)
+                }
 
-                        moveCell(index: whiteIndex)
-                        moveCell(index: blackIndex)
+                Divider()
+
+                if analysisDisplayLines.isEmpty {
+                    Text("No moves in analysis yet. Drag a piece on the board to start a line.")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    ForEach(analysisDisplayLines) { line in
+                        analysisDisplayLineView(line)
                     }
                 }
             }
@@ -291,28 +361,188 @@ struct GameDetailView: View {
         )
     }
 
-    private func moveCell(index: Int) -> some View {
-        Group {
-            if state.replaySans.indices.contains(index) {
-                let ply = index + 1
-                Button(state.replaySans[index]) {
-                    state.setReplayPly(ply)
+    private func analysisDisplayLineView(_ line: AnalysisDisplayLine) -> some View {
+        let isCollapsed = collapsedAnalysisNodeIDs.contains(line.rootNodeID)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                Color.clear
+                    .frame(width: CGFloat(line.depth) * 18)
+
+                if line.hasNestedVariations {
+                    Button {
+                        toggleCollapsed(id: line.rootNodeID)
+                    } label: {
+                        Image(systemName: isCollapsed ? "plus.square.fill" : "minus.square.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 14, alignment: .center)
+                } else {
+                    Image(systemName: line.isVariation ? "arrow.turn.down.right" : "circle.fill")
+                        .font(.system(size: line.isVariation ? 10 : 4, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary.opacity(0.75))
+                        .frame(width: 14, alignment: .center)
+                }
+
+                if !line.isVariation {
+                    Text("main")
+                        .font(Typography.detailLabel)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                Button {
+                    selectAnalysisNodeFromMoveList(line.rootNodeID)
+                } label: {
+                    Text(lineAttributedString(for: line))
+                        .font(Typography.dataMono)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                 }
                 .buttonStyle(.plain)
-                .font(Typography.dataMono)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .frame(minWidth: 80, alignment: .leading)
-                .background(ply == state.currentPly ? Theme.accent.opacity(0.25) : Theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(ply == state.currentPly ? Theme.accent : Theme.border.opacity(0.2), lineWidth: 1)
-                )
-            } else {
-                Color.clear
-                    .frame(minWidth: 80, maxHeight: 1)
+                .contextMenu {
+                    Button("Annotate") {
+                        annotateMove(line.rootNodeID)
+                    }
+
+                    Button("Delete Move", role: .destructive) {
+                        state.deleteAnalysisNode(id: line.rootNodeID)
+                    }
+                    .disabled(!canDeleteMove(line.rootNodeID))
+
+                    Divider()
+
+                    ForEach(annotationSymbolOptions, id: \.self) { symbol in
+                        Button {
+                            applyAnnotationSymbol(symbol, to: line.rootNodeID)
+                        } label: {
+                            if isAnnotationSymbolSelected(symbol, on: line.rootNodeID) {
+                                Label(symbol, systemImage: "checkmark")
+                            } else {
+                                Text(symbol)
+                            }
+                        }
+                    }
+                }
             }
+
+            if editingAnnotationNodeID == line.rootNodeID {
+                inlineAnnotationEditor(
+                    nodeID: line.rootNodeID,
+                    depth: line.depth,
+                    isVariation: line.isVariation
+                )
+            }
+        }
+    }
+
+    private func inlineAnnotationEditor(nodeID: UUID, depth: Int, isVariation: Bool) -> some View {
+        let columns = Array(repeating: GridItem(.fixed(38), spacing: 6), count: 4)
+
+        return VStack(alignment: .leading, spacing: 8) {
+            TextField(
+                "Comment for this move",
+                text: annotationCommentBinding(for: nodeID),
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(Typography.body)
+            .focused($inlineAnnotationFocusID, equals: nodeID)
+            .submitLabel(.done)
+            .onSubmit {
+                closeInlineAnnotationEditor()
+            }
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                ForEach(annotationSymbolOptions, id: \.self) { symbol in
+                    Button(symbol) {
+                        applyAnnotationSymbol(symbol, to: nodeID)
+                    }
+                    .buttonStyle(.plain)
+                    .font(Typography.dataMono)
+                    .frame(width: 38, height: 26)
+                    .background(
+                        isAnnotationSymbolSelected(symbol, on: nodeID)
+                            ? Theme.accent.opacity(0.22)
+                            : Theme.surface
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(
+                                isAnnotationSymbolSelected(symbol, on: nodeID)
+                                    ? Theme.accent
+                                    : Theme.border.opacity(0.3),
+                                lineWidth: 1
+                            )
+                    )
+                }
+            }
+        }
+        .padding(.leading, CGFloat(depth) * 18 + (isVariation ? 26 : 58))
+        .padding(.trailing, 6)
+    }
+
+    private func lineAttributedString(for line: AnalysisDisplayLine) -> AttributedString {
+        let tokens = lineTokens(for: line)
+        var text = AttributedString()
+
+        if line.isVariation {
+            text += AttributedString("( ")
+        }
+
+        for (index, token) in tokens.enumerated() {
+            let isSelectedMove = token.nodeID == state.currentAnalysisNodeID
+
+            var movePart = AttributedString(token.moveCore)
+            movePart.foregroundColor = Theme.textPrimary
+            if isSelectedMove {
+                movePart.backgroundColor = Theme.accent.opacity(0.28)
+            }
+            text += movePart
+
+            if !token.nags.isEmpty {
+                var nagsPart = AttributedString(" \(token.nags)")
+                nagsPart.foregroundColor = Theme.accent
+                text += nagsPart
+            }
+
+            if !token.annotation.isEmpty {
+                var commentPart = AttributedString(" \(token.annotation)")
+                commentPart.foregroundColor = Color(red: 0.20, green: 0.42, blue: 0.21)
+                text += commentPart
+            }
+
+            if index + 1 < tokens.count {
+                text += AttributedString(" ")
+            }
+        }
+
+        if line.isVariation {
+            text += AttributedString(" )")
+        }
+
+        return text
+    }
+
+    private func lineTokens(for line: AnalysisDisplayLine) -> [LineToken] {
+        line.nodeIDs.compactMap { nodeID in
+            guard let node = state.analysisNodesByID[nodeID] else { return nil }
+
+            let ply = plyForNode(nodeID) ?? 1
+            let moveCore = "\(movePrefixForPly(ply))\(node.san ?? node.uci ?? "...")"
+            let nags = node.nags.joined(separator: " ")
+            let annotation = node.comment.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            return LineToken(
+                nodeID: nodeID,
+                moveCore: moveCore,
+                nags: nags,
+                annotation: annotation
+            )
         }
     }
 
@@ -350,6 +580,289 @@ struct GameDetailView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
+    private var analysisDisplayLines: [AnalysisDisplayLine] {
+        let mainlineIDs = Array(state.analysisNodeIDByPly.dropFirst())
+        guard !mainlineIDs.isEmpty else { return [] }
+
+        var lines: [AnalysisDisplayLine] = []
+        var mainlineSegment: [UUID] = []
+
+        for nodeID in mainlineIDs {
+            mainlineSegment.append(nodeID)
+
+            let branchStarts = branchStartsForMainlineNode(nodeID)
+            guard !branchStarts.isEmpty else { continue }
+
+            let segmentNodeIDs = mainlineSegment
+            lines.append(
+                AnalysisDisplayLine(
+                    id: segmentNodeIDs.first ?? nodeID,
+                    rootNodeID: nodeID,
+                    nodeIDs: segmentNodeIDs,
+                    depth: 0,
+                    isVariation: false,
+                    hasNestedVariations: true
+                )
+            )
+
+            if !collapsedAnalysisNodeIDs.contains(nodeID) {
+                for startID in branchStarts {
+                    appendVariationLines(startNodeID: startID, depth: 1, lines: &lines)
+                }
+            }
+
+            mainlineSegment.removeAll()
+        }
+
+        if !mainlineSegment.isEmpty, let lastNodeID = mainlineSegment.last {
+            lines.append(
+                AnalysisDisplayLine(
+                    id: mainlineSegment.first ?? lastNodeID,
+                    rootNodeID: lastNodeID,
+                    nodeIDs: mainlineSegment,
+                    depth: 0,
+                    isVariation: false,
+                    hasNestedVariations: false
+                )
+            )
+        }
+
+        return lines
+    }
+
+    private func appendVariationLines(
+        startNodeID: UUID,
+        depth: Int,
+        lines: inout [AnalysisDisplayLine]
+    ) {
+        let principalIDs = principalVariationNodeIDs(from: startNodeID)
+        guard !principalIDs.isEmpty else { return }
+
+        var segment: [UUID] = []
+        for nodeID in principalIDs {
+            segment.append(nodeID)
+
+            let nestedStarts = branchStartsForVariationNode(nodeID)
+            guard !nestedStarts.isEmpty else { continue }
+
+            let segmentNodeIDs = segment
+            lines.append(
+                AnalysisDisplayLine(
+                    id: segmentNodeIDs.first ?? nodeID,
+                    rootNodeID: nodeID,
+                    nodeIDs: segmentNodeIDs,
+                    depth: depth,
+                    isVariation: true,
+                    hasNestedVariations: true
+                )
+            )
+
+            if !collapsedAnalysisNodeIDs.contains(nodeID) {
+                for nestedStartID in nestedStarts {
+                    appendVariationLines(startNodeID: nestedStartID, depth: depth + 1, lines: &lines)
+                }
+            }
+
+            segment.removeAll()
+        }
+
+        if !segment.isEmpty, let lastNodeID = segment.last {
+            lines.append(
+                AnalysisDisplayLine(
+                    id: segment.first ?? lastNodeID,
+                    rootNodeID: lastNodeID,
+                    nodeIDs: segment,
+                    depth: depth,
+                    isVariation: true,
+                    hasNestedVariations: false
+                )
+            )
+        }
+    }
+
+    private func principalVariationNodeIDs(from startNodeID: UUID) -> [UUID] {
+        var nodeIDs: [UUID] = []
+        var visited = Set<UUID>()
+        var cursor: UUID? = startNodeID
+
+        while let nodeID = cursor, !visited.contains(nodeID) {
+            visited.insert(nodeID)
+            nodeIDs.append(nodeID)
+            cursor = state.analysisNodesByID[nodeID]?.children.first
+        }
+
+        return nodeIDs
+    }
+
+    private func branchStartsForMainlineNode(_ nodeID: UUID) -> [UUID] {
+        guard let node = state.analysisNodesByID[nodeID] else {
+            return []
+        }
+
+        if let mainlinePly = state.analysisNodeIDByPly.firstIndex(of: nodeID) {
+            let nextPly = mainlinePly + 1
+            if state.analysisNodeIDByPly.indices.contains(nextPly) {
+                let mainlineContinuationID = state.analysisNodeIDByPly[nextPly]
+                return node.children.filter { $0 != mainlineContinuationID }
+            }
+        }
+
+        return node.children
+    }
+
+    private func branchStartsForVariationNode(_ nodeID: UUID) -> [UUID] {
+        guard let node = state.analysisNodesByID[nodeID] else { return [] }
+        return Array(node.children.dropFirst())
+    }
+
+    private func movePrefixForPly(_ ply: Int) -> String {
+        let moveNumber = (ply + 1) / 2
+        if ply.isMultiple(of: 2) {
+            return "\(moveNumber)..."
+        }
+        return "\(moveNumber)."
+    }
+
+    private func toggleCollapsed(id: UUID) {
+        if collapsedAnalysisNodeIDs.contains(id) {
+            collapsedAnalysisNodeIDs.remove(id)
+        } else {
+            collapsedAnalysisNodeIDs.insert(id)
+        }
+    }
+
+    private func collapseAllVariations() {
+        let mainlineIDs = Array(state.analysisNodeIDByPly.dropFirst())
+        var collapsed = Set<UUID>()
+
+        for mainlineID in mainlineIDs where !branchStartsForMainlineNode(mainlineID).isEmpty {
+            collapsed.insert(mainlineID)
+        }
+
+        let mainlineSet = Set(mainlineIDs)
+        for node in state.analysisNodesByID.values where !mainlineSet.contains(node.id) && !branchStartsForVariationNode(node.id).isEmpty {
+            collapsed.insert(node.id)
+        }
+
+        collapsedAnalysisNodeIDs = collapsed
+        expandSelectedAnalysisPath()
+    }
+
+    private func expandSelectedAnalysisPath() {
+        guard let selectedID = state.currentAnalysisNodeID else { return }
+        var cursor: UUID? = selectedID
+        while let nodeID = cursor {
+            collapsedAnalysisNodeIDs.remove(nodeID)
+            cursor = state.analysisNodesByID[nodeID]?.parentID
+        }
+    }
+
+    private func plyForNode(_ nodeID: UUID) -> Int? {
+        if let mainlinePly = state.analysisNodeIDByPly.firstIndex(of: nodeID) {
+            return mainlinePly
+        }
+
+        guard state.analysisNodesByID[nodeID] != nil else { return nil }
+
+        var visited = Set<UUID>()
+        var cursor: UUID? = nodeID
+        var ply = 0
+
+        while let currentID = cursor, !visited.contains(currentID) {
+            visited.insert(currentID)
+            guard let node = state.analysisNodesByID[currentID] else {
+                return nil
+            }
+
+            guard let parentID = node.parentID else {
+                return ply
+            }
+
+            ply += 1
+            cursor = parentID
+        }
+
+        return nil
+    }
+
+    private func selectAnalysisNodeFromMoveList(_ nodeID: UUID) {
+        if let mainlinePly = state.analysisNodeIDByPly.firstIndex(of: nodeID) {
+            state.setReplayPly(mainlinePly)
+        } else {
+            state.selectAnalysisNode(id: nodeID)
+        }
+    }
+
+    private func annotateMove(_ nodeID: UUID) {
+        selectAnalysisNodeFromMoveList(nodeID)
+        editingAnnotationNodeID = nodeID
+        DispatchQueue.main.async {
+            inlineAnnotationFocusID = nodeID
+        }
+    }
+
+    private func canDeleteMove(_ nodeID: UUID) -> Bool {
+        guard state.analysisNodesByID[nodeID] != nil else { return false }
+        guard nodeID != state.analysisRootNodeID else { return false }
+        return !state.analysisNodeIDByPly.contains(nodeID)
+    }
+
+    private func annotationCommentBinding(for nodeID: UUID) -> Binding<String> {
+        Binding(
+            get: { state.analysisNodesByID[nodeID]?.comment ?? "" },
+            set: { state.updateAnalysisComment(id: nodeID, comment: $0) }
+        )
+    }
+
+    private func applyAnnotationSymbol(_ symbol: String, to nodeID: UUID) {
+        selectAnalysisNodeFromMoveList(nodeID)
+        state.applyAnalysisAnnotationSymbol(id: nodeID, symbol: symbol)
+        editingAnnotationNodeID = nodeID
+    }
+
+    private func closeInlineAnnotationEditor() {
+        editingAnnotationNodeID = nil
+        inlineAnnotationFocusID = nil
+    }
+
+    private func isAnnotationSymbolSelected(_ symbol: String, on nodeID: UUID) -> Bool {
+        state.analysisNodesByID[nodeID]?.nags.contains(symbol) == true
+    }
+
+    private func activeMoveAnnotationBadge() -> (symbol: String, color: Color)? {
+        guard let currentNode = state.currentAnalysisNode else { return nil }
+        let priority = ["!!", "!?", "??", "?!", "?", "!"]
+
+        for symbol in priority where currentNode.nags.contains(symbol) {
+            return (symbol, colorForAnnotationSymbol(symbol))
+        }
+
+        return nil
+    }
+
+    private func colorForAnnotationSymbol(_ symbol: String) -> Color {
+        switch symbol {
+        case "!!":
+            return Color(red: 0.15, green: 0.47, blue: 0.94) // blue
+        case "!?":
+            return Color(red: 0.07, green: 0.19, blue: 0.45) // dark blue
+        case "?!":
+            return Color(red: 0.94, green: 0.86, blue: 0.46) // light yellow
+        case "?":
+            return Color(red: 0.92, green: 0.53, blue: 0.15) // orange
+        case "??":
+            return Color(red: 0.82, green: 0.18, blue: 0.14) // blunder
+        default:
+            return Theme.accent
+        }
+    }
+
+    private var isCurrentAnalysisOnReplayMainline: Bool {
+        guard let currentID = state.currentAnalysisNodeID else { return true }
+        guard state.analysisNodeIDByPly.indices.contains(state.currentPly) else { return false }
+        return state.analysisNodeIDByPly[state.currentPly] == currentID
+    }
+
     private func chooseEngineBinary() {
         #if canImport(AppKit)
         let panel = NSOpenPanel()
@@ -364,25 +877,79 @@ struct GameDetailView: View {
     }
 
     private func highlightedSquares() -> Set<String> {
-        guard state.currentPly > 0 else { return [] }
-        let index = state.currentPly - 1
-        guard state.replayUcis.indices.contains(index) else { return [] }
-        let uci = state.replayUcis[index]
-        guard uci.count >= 4 else { return [] }
-
-        let chars = Array(uci)
-        let from = String(chars[0...1])
-        let to = String(chars[2...3])
-
-        guard isSquareString(from), isSquareString(to) else { return [] }
-        return [from, to]
+        guard let squares = moveSquaresFromActiveNode() else { return [] }
+        return [squares.from, squares.to]
     }
 
     private func lastMoveSquares() -> (from: String, to: String)? {
+        moveSquaresFromActiveNode()
+    }
+
+    private func moveSquaresFromActiveNode() -> (from: String, to: String)? {
+        if let uci = state.currentAnalysisNode?.uci,
+           let parsed = parseUciSquares(uci) {
+            return parsed
+        }
+
         guard state.currentPly > 0 else { return nil }
         let index = state.currentPly - 1
         guard state.replayUcis.indices.contains(index) else { return nil }
-        let uci = state.replayUcis[index]
+        return parseUciSquares(state.replayUcis[index])
+    }
+
+    private func refreshLegalMoveLookup(for fen: String) async {
+        legalMoveLookupBySource = [:]
+
+        do {
+            let legalMoves = try await state.legalMoves(fen: fen)
+            if Task.isCancelled { return }
+            legalMoveLookupBySource = buildLegalMoveLookup(legalMoves)
+        } catch {
+            if Task.isCancelled { return }
+            legalMoveLookupBySource = [:]
+        }
+    }
+
+    private func buildLegalMoveLookup(_ legalMoves: [String]) -> [String: [String: String]] {
+        var lookup: [String: [String: String]] = [:]
+
+        for uci in legalMoves {
+            guard let squares = parseUciSquares(uci) else { continue }
+            var destinations = lookup[squares.from] ?? [:]
+
+            if let existing = destinations[squares.to] {
+                if shouldPreferPromotion(from: uci, over: existing) {
+                    destinations[squares.to] = uci
+                }
+            } else {
+                destinations[squares.to] = uci
+            }
+
+            lookup[squares.from] = destinations
+        }
+
+        return lookup
+    }
+
+    private func shouldPreferPromotion(from candidate: String, over existing: String) -> Bool {
+        let existingPromotion = promotionPiece(in: existing)
+        let candidatePromotion = promotionPiece(in: candidate)
+
+        if existingPromotion == "q" {
+            return false
+        }
+        if candidatePromotion == "q" {
+            return true
+        }
+        return false
+    }
+
+    private func promotionPiece(in uci: String) -> Character? {
+        guard uci.count == 5 else { return nil }
+        return Array(uci)[4]
+    }
+
+    private func parseUciSquares(_ uci: String) -> (from: String, to: String)? {
         guard uci.count >= 4 else { return nil }
 
         let chars = Array(uci)

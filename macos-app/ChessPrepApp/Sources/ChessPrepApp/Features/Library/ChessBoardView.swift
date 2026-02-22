@@ -5,25 +5,43 @@ struct ChessBoardView: View {
     let whiteAtBottom: Bool
     let highlightedSquares: Set<String>
     let lastMove: (from: String, to: String)?
+    let legalMovesByFrom: [String: [String: String]]
+    let moveAnnotationBadge: (symbol: String, color: Color)?
     let cellSize: CGFloat
+    let onMoveAttempt: ((String) -> Void)?
+
+    @State private var dragStartSquare: String?
+    @State private var dragCurrentSquare: String?
+    @State private var dragPiece: Character?
+    @State private var dragLocation: CGPoint?
+    @State private var selectedSquare: String?
 
     init(
         fen: String,
         whiteAtBottom: Bool = true,
         highlightedSquares: Set<String> = [],
         lastMove: (from: String, to: String)? = nil,
-        cellSize: CGFloat = 46
+        legalMovesByFrom: [String: [String: String]] = [:],
+        moveAnnotationBadge: (symbol: String, color: Color)? = nil,
+        cellSize: CGFloat = 46,
+        onMoveAttempt: ((String) -> Void)? = nil
     ) {
         self.fen = fen
         self.whiteAtBottom = whiteAtBottom
         self.highlightedSquares = highlightedSquares
         self.lastMove = lastMove
+        self.legalMovesByFrom = legalMovesByFrom
+        self.moveAnnotationBadge = moveAnnotationBadge
         self.cellSize = cellSize
+        self.onMoveAttempt = onMoveAttempt
     }
 
     var body: some View {
         let board = boardMatrix(from: fen)
         let boardSize = cellSize * 8
+        let dragHighlights = Set([dragStartSquare, dragCurrentSquare].compactMap { $0 })
+        let selectedTargets = selectedSquare.map { legalTargets(from: $0) } ?? []
+        let dragTargets = dragStartSquare.map { legalTargets(from: $0) } ?? []
 
         ZStack {
             VStack(spacing: 0) {
@@ -36,6 +54,11 @@ struct ChessBoardView: View {
                             let isDark = (boardRank + boardFile).isMultiple(of: 2)
                             let square = squareName(rankIndex: boardRank, fileIndex: boardFile)
                             let isHighlighted = highlightedSquares.contains(square)
+                                || dragHighlights.contains(square)
+                                || selectedSquare == square
+                                || selectedTargets.contains(square)
+                                || dragTargets.contains(square)
+                            let hidePiece = dragStartSquare == square && dragPiece != nil
 
                             ZStack {
                                 Rectangle()
@@ -48,7 +71,7 @@ struct ChessBoardView: View {
                                         .frame(width: cellSize, height: cellSize)
                                 }
 
-                                if let piece {
+                                if let piece, !hidePiece {
                                     pieceGlyph(for: piece)
                                 }
                             }
@@ -61,6 +84,21 @@ struct ChessBoardView: View {
                let from = boardPoint(for: lastMove.from),
                let to = boardPoint(for: lastMove.to) {
                 lastMoveArrow(from: from, to: to)
+
+                if let moveAnnotationBadge {
+                    boardAnnotationBadge(
+                        symbol: moveAnnotationBadge.symbol,
+                        color: moveAnnotationBadge.color,
+                        destination: to
+                    )
+                }
+            }
+
+            if let dragPiece, let dragLocation {
+                pieceGlyph(for: dragPiece)
+                    .position(dragLocation)
+                    .allowsHitTesting(false)
+                    .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
             }
         }
         .frame(width: boardSize, height: boardSize)
@@ -69,6 +107,158 @@ struct ChessBoardView: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(explorerBorder, lineWidth: 1)
         )
+        .contentShape(Rectangle())
+        .gesture(dragGesture(board: board, boardSize: boardSize))
+        .simultaneousGesture(tapGesture(board: board, boardSize: boardSize))
+        .onChange(of: fen) { _, _ in
+            clearDragState()
+            clearSelection()
+        }
+    }
+
+    private func dragGesture(board: [[Character?]], boardSize: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                guard onMoveAttempt != nil else { return }
+
+                if dragStartSquare == nil {
+                    guard let start = squareName(at: value.startLocation, boardSize: boardSize),
+                          let piece = piece(at: start, board: board),
+                          isPieceDraggable(piece) else {
+                        return
+                    }
+                    dragStartSquare = start
+                    dragCurrentSquare = start
+                    dragPiece = piece
+                    selectedSquare = start
+                }
+
+                dragCurrentSquare = squareName(at: value.location, boardSize: boardSize)
+                dragLocation = clampedPoint(value.location, boardSize: boardSize)
+            }
+            .onEnded { value in
+                defer { clearDragState() }
+                guard onMoveAttempt != nil else { return }
+                guard let from = dragStartSquare,
+                      let to = squareName(at: value.location, boardSize: boardSize),
+                      from != to,
+                      let uci = legalMove(from: from, to: to) else {
+                    return
+                }
+
+                clearSelection()
+                onMoveAttempt?(uci)
+            }
+    }
+
+    private func tapGesture(board: [[Character?]], boardSize: CGFloat) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                guard onMoveAttempt != nil else { return }
+                handleTap(at: value.location, board: board, boardSize: boardSize)
+            }
+    }
+
+    private func handleTap(at location: CGPoint, board: [[Character?]], boardSize: CGFloat) {
+        guard let tappedSquare = squareName(at: location, boardSize: boardSize) else {
+            clearSelection()
+            return
+        }
+
+        if let selectedSquare {
+            if selectedSquare == tappedSquare {
+                clearSelection()
+                return
+            }
+
+            if let uci = legalMove(from: selectedSquare, to: tappedSquare) {
+                clearSelection()
+                onMoveAttempt?(uci)
+                return
+            }
+        }
+
+        guard let tappedPiece = piece(at: tappedSquare, board: board),
+              isPieceDraggable(tappedPiece),
+              !legalTargets(from: tappedSquare).isEmpty else {
+            clearSelection()
+            return
+        }
+
+        self.selectedSquare = tappedSquare
+    }
+
+    private func clearDragState() {
+        dragStartSquare = nil
+        dragCurrentSquare = nil
+        dragPiece = nil
+        dragLocation = nil
+    }
+
+    private func clearSelection() {
+        selectedSquare = nil
+    }
+
+    private func legalTargets(from square: String) -> Set<String> {
+        guard let destinations = legalMovesByFrom[square] else { return [] }
+        return Set(destinations.keys)
+    }
+
+    private func legalMove(from: String, to: String) -> String? {
+        legalMovesByFrom[from]?[to]
+    }
+
+    private func clampedPoint(_ point: CGPoint, boardSize: CGFloat) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, 0), boardSize),
+            y: min(max(point.y, 0), boardSize)
+        )
+    }
+
+    private func squareName(at point: CGPoint, boardSize: CGFloat) -> String? {
+        guard point.x >= 0, point.y >= 0, point.x < boardSize, point.y < boardSize else {
+            return nil
+        }
+
+        let displayCol = Int(point.x / cellSize)
+        let displayRow = Int(point.y / cellSize)
+        guard (0..<8).contains(displayCol), (0..<8).contains(displayRow) else {
+            return nil
+        }
+
+        let boardRank = whiteAtBottom ? displayRow : 7 - displayRow
+        let boardFile = whiteAtBottom ? displayCol : 7 - displayCol
+        return squareName(rankIndex: boardRank, fileIndex: boardFile)
+    }
+
+    private func piece(at square: String, board: [[Character?]]) -> Character? {
+        guard square.count == 2 else { return nil }
+        let bytes = Array(square.utf8)
+        guard bytes.count == 2 else { return nil }
+
+        let file = Int(bytes[0]) - 97
+        let rank = Int(bytes[1]) - 48
+        let boardRank = 8 - rank
+        guard (0..<8).contains(file), (0..<8).contains(boardRank) else {
+            return nil
+        }
+
+        return board[boardRank][file]
+    }
+
+    private func isPieceDraggable(_ piece: Character) -> Bool {
+        guard let side = activeSide() else { return true }
+        if side == "w" {
+            return piece.isUppercase
+        }
+        return piece.isLowercase
+    }
+
+    private func activeSide() -> Character? {
+        let parts = fen.split(separator: " ")
+        guard parts.count > 1 else { return nil }
+        guard let side = parts[1].first, (side == "w" || side == "b") else { return nil }
+        return side
     }
 
     private func boardPoint(for square: String) -> CGPoint? {
@@ -116,6 +306,27 @@ struct ChessBoardView: View {
             head.closeSubpath()
             context.fill(head, with: .color(.yellow.opacity(0.88)))
         }
+    }
+
+    private func boardAnnotationBadge(symbol: String, color: Color, destination: CGPoint) -> some View {
+        Text(symbol)
+            .font(.system(size: max(11, cellSize * 0.24), weight: .bold, design: .rounded))
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule()
+                    .fill(color.opacity(0.95))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.black.opacity(0.2), lineWidth: 1)
+            )
+            .position(
+                x: destination.x + cellSize * 0.28,
+                y: destination.y - cellSize * 0.30
+            )
+            .allowsHitTesting(false)
     }
 
     private func squareName(rankIndex: Int, fileIndex: Int) -> String {
